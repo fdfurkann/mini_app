@@ -5,6 +5,12 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
+import https from 'https';
+import axios from 'axios';
+
+// Axios için özel bir agent oluşturarak IPv4 kullanımını zorunlu kıl
+const httpsAgent = new https.Agent({ family: 4 });
+
 dotenv.config();
 
 import pool from '../db.js';
@@ -357,20 +363,23 @@ router.post('/channels/check-member', async (req, res) => {
     console.log('[DEBUG] Eksik parametre:', { telegramUserId, channelId });
     return res.status(400).json({ ok: false, error: 'Eksik parametre.' });
   }
-  if (!botInstance) {
+  if (!BOT_TOKEN) {
     console.log('[DEBUG] Bot başlatılamadı.');
     return res.status(500).json({ ok: false, error: 'Bot başlatılamadı.' });
   }
   let fixedChannelId = channelId;
-  if (!String(channelId).startsWith('-100')) {
+  if (!String(channelId).startsWith('@') && !String(channelId).startsWith('-100')) {
     fixedChannelId = '-100' + String(channelId);
     console.log('[DEBUG] channelId düzeltildi:', { original: channelId, fixed: fixedChannelId });
   }
   const restApiUrl = `https://api.telegram.org/bot${process.env.BOT_TOKEN}/getChatMember?chat_id=${fixedChannelId}&user_id=${telegramUserId}`;
   console.log('[DEBUG] getChatMember REST API linki:', restApiUrl);
   try {
-    console.log('[DEBUG] getChatMember çağrılıyor:', { channelId: fixedChannelId, telegramUserId });
-    const member = await botInstance.getChatMember(fixedChannelId, telegramUserId);
+    console.log('[DEBUG] getChatMember çağrılıyor (axios ile):', { channelId: fixedChannelId, telegramUserId });
+    
+    const response = await axios.get(restApiUrl, { httpsAgent });
+    const member = response.data.result;
+
     console.log('[DEBUG] getChatMember sonucu:', member);
     if (member && ['member', 'administrator', 'creator'].includes(member.status)) {
       console.log('[DEBUG] Kullanıcı abone, status:', member.status);
@@ -380,8 +389,9 @@ router.post('/channels/check-member', async (req, res) => {
       return res.status(403).json({ ok: false, error: 'Kullanıcı abone değil.' });
     }
   } catch (err) {
-    console.log('[DEBUG] getChatMember hata:', err && err.message ? err.message : err);
-    return res.status(403).json({ ok: false, error: 'Kullanıcı abone değil veya erişim yok.' });
+    console.log('[DEBUG] getChatMember hata:', err.response ? err.response.data : (err.message || err));
+    const errorMessage = err.response && err.response.data && err.response.data.description ? err.response.data.description : 'Kullanıcı abone değil veya erişim yok.';
+    return res.status(403).json({ ok: false, error: errorMessage });
   }
 });
 
@@ -416,4 +426,4 @@ router.post('/channels/:id/bulk-notification', async (req, res) => {
   }
 });
 
-export default router; 
+export default router;

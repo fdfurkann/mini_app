@@ -1,7 +1,11 @@
 import { Router } from 'express';
 import pool from '../db.js';
 import dotenv from 'dotenv';
-import fetch from 'node-fetch';
+import axios from 'axios';
+import https from 'https';
+
+// Axios için özel bir agent oluşturarak IPv4 kullanımını zorunlu kıl
+const httpsAgent = new https.Agent({ family: 4 });
 
 dotenv.config();
 
@@ -12,14 +16,14 @@ async function sendTelegramMessage(telegramId, message) {
   const BOT_TOKEN = process.env.BOT_TOKEN;
   if (!BOT_TOKEN) return;
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-  await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  try {
+    await axios.post(url, {
       chat_id: telegramId,
       text: message
-    })
-  });
+    }, { httpsAgent });
+  } catch (error) {
+    console.error(`Telegram mesajı gönderilemedi (${telegramId}):`, error.response ? error.response.data : error.message);
+  }
 }
 
 // Kanal sahibi başvuru endpointi
@@ -30,14 +34,16 @@ router.post('/channel-owner', async (req, res) => {
       return res.status(400).json({ error: 'Eksik bilgi' });
     }
 
+    const description = `Başvuru Bilgileri:\n- Sahip: ${fullName}\n- Email: ${email}\n- Telefon: ${phoneNumber}\n- Takipçi: ${followerCount}\n- Telegram: ${ownerTelegram}\n- Kanal Linki: ${channelLink}`;
+
     // bot_rooms tablosuna pasif kanal ekle
     await pool.execute(
       'INSERT INTO bot_rooms (room_id, room_name, channel_desc, channel_img, register, active) VALUES (?, ?, ?, ?, ?, ?)',
       [
-        0, // room_id
+        0, // room_id (admin tarafından güncellenecek)
         channelName,
-        ``,
-        '', // channel_img zorunlu, boş string
+        description,
+        '', // channel_img
         new Date().toISOString().slice(0, 19).replace('T', ' '),
         0 // pasif
       ]
@@ -54,11 +60,11 @@ router.post('/channel-owner', async (req, res) => {
       await sendTelegramMessage(adminId, message);
     }
 
-    // Form tekrar gösterilsin diye success:false dön
-    res.json({ success: false });
+    res.json({ success: true });
   } catch (error) {
+    console.error('Kanal başvurusu hatası:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-export default router; 
+export default router;
