@@ -9,8 +9,7 @@ import { getChannelById, Signal2 } from '@/services/api';
 import { Badge } from "@/components/ui/badge";
 
 import ChannelDetailTable from '@/components/ChannelDetailTable';
-import { TradeData, calculateProfitChartData, getSignalCount, getSuccessRate, getTotalProfitPercent, getSignalProfitStatus } from '@/components/ChannelDetailUtils';
-import { formatNumberByDigits } from '@/utils/helpers';
+import { calculateProfitChartData, getSignalProfitStatus, TradeData } from '@/components/ChannelDetailUtils';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useLang } from '@/hooks/useLang';
 
@@ -76,6 +75,7 @@ const ChannelDetail: React.FC = () => {
         if (!data) {
           setError('Kanal bulunamadı');
         } else {
+          console.log("--- [1] API'den gelen ham veri (channelData):", data);
           setChannelData(data);
         }
       })
@@ -88,15 +88,14 @@ const ChannelDetail: React.FC = () => {
       });
   }, [id]);
 
-  // Kar grafiği verisi: API'den gelen kümülatif veriyi kullan
-  const profitChartData = useMemo(() => {
-    if (!channelData || !channelData.cumulativeProfitData) return [];
-    // Gelen veriyi Recharts formatına dönüştür
-    return channelData.cumulativeProfitData.map(([timestamp, profit]: [number, number]) => ({
-      name: new Date(timestamp).toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit', year: '2-digit' }),
-      [channelData.room_name || 'Profit']: profit.toFixed(2),
-    }));
+  // Kar grafiği verisi: Yeni utility fonksiyonunu kullanarak hesapla
+  const { chartData: profitChartData } = useMemo(() => {
+    if (!channelData || !channelData.signals) {
+      return { chartData: [] };
+    }
+    return calculateProfitChartData(channelData.signals);
   }, [channelData]);
+
 
   const toggleRowExpansion = (ticket: number) => {
     setExpandedRows(prev => ({ ...prev, [ticket]: !prev[ticket] }));
@@ -177,23 +176,48 @@ const ChannelDetail: React.FC = () => {
         <CardHeader className="py-2 px-3"><CardTitle className="text-sm">{t('cumulative_profit_loss')}</CardTitle></CardHeader>
         <CardContent className="p-0">
           <div className="h-[300px] w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={profitChartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-                <YAxis tick={{ fontSize: 10 }} tickFormatter={(value) => `${value}%`} />
-                <RechartsTooltip formatter={(value: number) => [`${Number(value).toFixed(3)}%`, t('profit')]} />
-                <Legend />
-                <Line
-                  type="monotone"
-                  dataKey={room_name || 'Profit'}
-                  stroke={COLORS[0]}
-                  strokeWidth={2}
-                  dot={false}
-                  name={room_name || t('cumulative_profit')}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            {profitChartData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={profitChartData} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                  <XAxis 
+                    dataKey="name" 
+                    tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} 
+                    axisLine={{ stroke: "hsl(var(--border))" }}
+                    tickLine={{ stroke: "hsl(var(--border))" }}
+                  />
+                  <YAxis 
+                    tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} 
+                    axisLine={{ stroke: "hsl(var(--border))" }}
+                    tickLine={{ stroke: "hsl(var(--border))" }}
+                    tickFormatter={(value) => `${value.toFixed(0)}%`}
+                  />
+                  <RechartsTooltip
+                    contentStyle={{
+                      backgroundColor: "hsl(var(--background))",
+                      borderColor: "hsl(var(--border))",
+                      color: "hsl(var(--foreground))",
+                      fontSize: '12px',
+                      borderRadius: '0.5rem',
+                    }}
+                    labelStyle={{ fontWeight: 'bold' }}
+                    formatter={(value: number, name: string) => [`${value.toFixed(2)}%`, t('cumulative_profit')]}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="profit"
+                    stroke={COLORS[0]}
+                    strokeWidth={2}
+                    dot={false}
+                    name={t('cumulative_profit')}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-full text-muted-foreground">
+                {t('no_chart_data')}
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -214,7 +238,7 @@ const ChannelDetail: React.FC = () => {
             totalPages={totalPages}
             goToPreviousPage={goToPreviousPage}
             goToNextPage={goToNextPage}
-            getSignalProfitStatus={getSignalProfitStatus}
+            getSignalProfitStatus={(signal) => getSignalProfitStatus(signal)}
           />
         </CardContent>
       </Card>

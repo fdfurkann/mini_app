@@ -275,12 +275,27 @@ router.get('/channels/:id', async (req, res) => {
       const signalsToSend = signalsWithProfitPercent
         .sort((a, b) => new Date(b.close_time).getTime() - new Date(a.close_time).getTime())
         .slice(0, 1000);
+
+      // Kümülatif kar grafiği için profitData oluştur
+      let cumulativeProfit = 0;
+      const profitData = signalsRows
+        .sort((a, b) => new Date(a.close_time).getTime() - new Date(b.close_time).getTime()) // Tarihe göre artan sırala
+        .map(signal => {
+          // NaN (Not-a-Number) riskini önlemek için daha güvenli bir kontrol
+          const profit = typeof signal.profit === 'number' ? signal.profit : (parseFloat(signal.profit) || 0);
+          cumulativeProfit += profit;
+          // getTime() zaten milisaniye döndürür
+          const timestamp = new Date(signal.close_time).getTime();
+          return [timestamp, cumulativeProfit];
+        });
+
       res.json({
         ...channelData,
         totalProfit: Number(totalProfit.toFixed(2)) || 0,
         totalSignals: signalCount,
         successRate: Number(successRate.toFixed(2)) || 0,
         signals: signalsToSend,
+        profitData: profitData, // Grafiği verisini yanıta ekle
         pagination: {
           currentPage: page,
           totalPages: Math.ceil(closedCount / limit),
