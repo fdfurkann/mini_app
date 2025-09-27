@@ -345,6 +345,20 @@ function create_order(
             $order_ticket = $main_order_result["orderId"] ?? $main_order_result["orderID"];
             $order_status = $main_order_result["status"];
 
+            // Borsadan gerçek giriş fiyatını al
+            $gercek_acilis_fiyati = $price; // Fallback olarak anlık fiyat
+            try {
+                $order_details = $binance->order_status($symbol, $order_ticket);
+                if (isset($order_details["avgPrice"]) && (float)$order_details["avgPrice"] > 0) {
+                    $gercek_acilis_fiyati = $order_details["avgPrice"];
+                    print_log($my, $s_id, $user_id, $us_id, $channel, "Borsadan gerçek açılış fiyatı alındı: {$gercek_acilis_fiyati}");
+                } else {
+                    print_log($my, $s_id, $user_id, $us_id, $channel, "Gerçek açılış fiyatı alınamadı (avgPrice=0), anlık fiyat kullanılıyor: {$gercek_acilis_fiyati}. Gelen Cevap: " . print_rr($order_details, true));
+                }
+            } catch (Exception $e) {
+                print_log($my, $s_id, $user_id, $us_id, $channel, "Gerçek açılış fiyatı alınırken hata oluştu, anlık fiyat kullanılıyor: {$gercek_acilis_fiyati}. Hata: " . $e->getMessage());
+            }
+
             global $user_leverage;
             $opentime = date("d-m-Y H:i:s");
             $signal_str =
@@ -352,7 +366,7 @@ function create_order(
                 "📊 **Order Details:**\n" .
                 "📡 **API Name:** {$api["api_name"]}\n" .
                 "🏦 **Exchange:** {$api_exchange}\n" .
-                "💰 **Entry Price:** {$price}\n" .
+                "💰 **Entry Price:** {$gercek_acilis_fiyati}\n" .
                 "📦 **Volume:** {$volume}\n" .
                 "⚙️ **Leverage:** {$user_leverage}x\n" .
                 "⏰ **Open Time:** {$opentime}\n\n" .
@@ -360,7 +374,7 @@ function create_order(
 
             $my->query(
                 "update user_signals set open='" .
-                    $price .
+                    $gercek_acilis_fiyati .
                     "', volume='" .
                     $volume .
                     "', ticket='" .
@@ -369,7 +383,7 @@ function create_order(
                     $sid .
                     "'"
             );
-            print_log($my, $s_id, $user_id, $us_id, $channel, "#{$order_ticket} {$symbol} {$sg["direction"]} MARKET {$volume} {$price} " . date("Y-m-d H:i:s") . " {$order_status}");
+            print_log($my, $s_id, $user_id, $us_id, $channel, "#{$order_ticket} {$symbol} {$sg["direction"]} MARKET {$volume} {$gercek_acilis_fiyati} " . date("Y-m-d H:i:s") . " {$order_status}");
 
             // Send position opened notification
             bildirim_ekle(
