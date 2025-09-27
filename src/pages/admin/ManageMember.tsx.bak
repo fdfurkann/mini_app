@@ -1,0 +1,923 @@
+import React, { useState, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { format } from 'date-fns';
+import { tr } from 'date-fns/locale';
+import { toast } from "sonner";
+import { 
+  User, Key, Bell, CreditCard, Activity, 
+  ArrowLeft, Pencil, Trash2, Plus, Check, 
+  AlertTriangle, CheckCircle2, XCircle, ChevronUp, ChevronDown 
+} from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { API_URL } from '../../config';
+
+interface UserData {
+  id: number;
+  username: string;
+  full_name: string;
+  email: string;
+  phone: string;
+  is_admin: boolean;
+  is_vip: boolean;
+  subscription_expires_at: string;
+  created_at: string;
+  updated_at: string;
+  last_login: string;
+  login_hash: string;
+  status: 'active' | 'inactive' | 'banned';
+  language: string;
+  notes: string;
+  old_id: number | null;
+}
+
+interface Trade {
+  id: number;
+  ticket: string;
+  symbol: string;
+  trend: 'LONG' | 'SHORT';
+  open: number;
+  opentime: string;
+  volume: number;
+  sl: number;
+  tp: number;
+  close: number;
+  closetime: string;
+  profit: number;
+  status: string;
+}
+
+interface ApiKey {
+  id: number;
+  api_name: string;
+  api_key: string;
+  api_secret: string;
+  api_type: number;
+  bot_room: number;
+  status: boolean;
+  created_at: string;
+}
+
+interface Notification {
+  id: number;
+  message: string;
+  sent_status: number;
+  created_at?: string;
+}
+
+interface Subscription {
+  id: number;
+  package_name: string;
+  package_price: string;
+  package_description: string;
+  package_time: number;
+  package_api_rights: number;
+  start_date: string;
+  end_date: string;
+}
+
+// Güvenli tarih formatlama fonksiyonu
+const formatDate = (dateStr: string | null | undefined) => {
+  if (!dateStr) return '-';
+  try {
+    return format(new Date(dateStr), 'dd.MM.yyyy HH:mm', { locale: tr });
+  } catch (e) {
+    console.warn('Invalid date:', dateStr);
+    return '-';
+  }
+};
+
+const ManageMember: React.FC = () => {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  // ID geçerlilik kontrolü
+  useEffect(() => {
+    if (!id) {
+      toast.error('Geçersiz üye ID. Lütfen tekrar deneyin.');
+      navigate('/admin/members');
+    }
+  }, [id, navigate]);
+
+  const [isMobileView, setIsMobileView] = useState(window.innerWidth < 768);
+  const [expandedRows, setExpandedRows] = useState<Record<number, boolean>>({});
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [profileFormData, setProfileFormData] = useState<Partial<UserData>>({});
+
+  const toggleRowExpansion = (tradeId: number) => {
+    setExpandedRows(prev => ({
+      ...prev,
+      [tradeId]: !prev[tradeId]
+    }));
+  };
+
+  useEffect(() => {
+    const handleResize = () => {
+      const screenWidth = window.innerWidth;
+      setIsMobileView(screenWidth < 768);
+    };
+
+    window.addEventListener("resize", handleResize);
+    handleResize(); // Initial call
+
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  const { data: memberQueryData, isLoading: memberDataLoading, error: memberDataError } = useQuery({
+    queryKey: ['member-details', id],
+    queryFn: async () => {
+      if (!id) {
+        throw new Error('Geçersiz üye ID');
+      }
+      const response = await fetch(`${API_URL}/admin/members/${id}/details`);
+      if (!response.ok) throw new Error('Üye bilgileri alınamadı');
+      return response.json() as Promise<{ member: UserData, trades: Trade[], apiKeys: ApiKey[], notifications: Notification[], subscriptions: Subscription[] }>;
+    },
+    enabled: !!id // Sadece geçerli bir ID varsa sorguyu çalıştır
+  });
+
+  useEffect(() => {
+    if (memberQueryData?.member) {
+      const member = memberQueryData.member;
+      // Form verilerini düzgün formatta ayarlayalım
+      setProfileFormData({
+        ...member,
+        // İhtiyaç duyulan dönüşümleri burada yapabiliriz
+        subscription_expires_at: member.subscription_expires_at || '',
+        is_admin: !!member.is_admin,
+        is_vip: !!member.is_vip,
+        notes: member.notes || ''
+      });
+    }
+  }, [memberQueryData?.member]);
+
+  // id değiştiğinde formu sıfırla
+  useEffect(() => {
+    setProfileFormData({});
+  }, [id]);
+
+  const profileUpdateMutation = useMutation({
+    mutationFn: async (updatedData: Partial<UserData>) => {
+      const response = await fetch(`${API_URL}/admin/members/${id}/profile`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedData)
+      });
+      if (!response.ok) throw new Error('Profil güncellenemedi');
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['member-details', id] });
+      toast.success('Profil başarıyla güncellendi');
+      setIsEditingProfile(false);
+    },
+    onError: (error) => {
+      toast.error(`Profil güncellenirken hata: ${error.message}`);
+    }
+  });
+
+  const handleProfileInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+    const { name, value, type } = e.target;
+    let processedValue: string | number | boolean | null = value;
+
+    if (type === 'checkbox') {
+      processedValue = (e.target as HTMLInputElement).checked;
+    } else if (type === 'datetime-local') {
+      processedValue = value ? new Date(value).toISOString() : null;
+    } else if (name === 'is_admin' || name === 'is_vip' || name === 'old_id') {
+      processedValue = value ? parseInt(value, 10) : null;
+      if (isNaN(processedValue as number)) processedValue = null; 
+    }
+
+    setProfileFormData(prev => ({ ...prev, [name]: processedValue }));
+  };
+
+  const handleProfileSave = () => {
+    profileUpdateMutation.mutate(profileFormData);
+  };
+
+  // Diğer mutation'lar (API key, abonelik vb.) buraya eklenecek...
+  // Örnek API Key silme (Diğerleri de benzer şekilde güncellenmeli)
+  const [apiKeyToDelete, setApiKeyToDelete] = useState<number | null>(null);
+  const deleteApiKeyMutation = useMutation<unknown, Error, number>({
+    mutationFn: async (keyId: number) => {
+      const response = await fetch(`${API_URL}/admin/members/${id}/api-keys/${keyId}`, {
+        method: 'DELETE'
+      });
+      if (!response.ok) throw new Error('API anahtarı silinemedi');
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['member-details', id] });
+      toast.success('API anahtarı başarıyla silindi.');
+      setApiKeyToDelete(null);
+    },
+    onError: (error) => {
+      toast.error(`API anahtarı silinirken hata: ${error.message}`);
+    }
+  });
+
+  const cancelSubscriptionMutation = useMutation<unknown, Error, number>({
+    mutationFn: async (subscriptionId: number) => {
+      const response = await fetch(`${API_URL}/admin/members/${id}/subscriptions/${subscriptionId}/cancel`, {
+        method: 'PUT', // Veya API'nize göre DELETE vs.
+      });
+      if (!response.ok) throw new Error('Abonelik iptal edilemedi');
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['member-details', id] });
+      toast.success('Abonelik başarıyla iptal edildi.');
+    },
+    onError: (error) => {
+      toast.error(`Abonelik iptal edilirken hata: ${error.message}`);
+    }
+  });
+
+  const addApiKeyMutation = useMutation<unknown, Error, Omit<ApiKey, 'id' | 'created_at' | 'status'> & { user_id: string | undefined }>({
+    mutationFn: async (newKeyData) => {
+      const response = await fetch(`${API_URL}/admin/members/${id}/api-keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newKeyData)
+      });
+      if (!response.ok) throw new Error('Yeni API anahtarı eklenemedi');
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['member-details', id] });
+      toast.success('Yeni API anahtarı başarıyla eklendi.');
+      // Gerekirse dialog kapatılabilir: setShowNewApiDialog(false);
+    },
+    onError: (error) => {
+      toast.error(`API anahtarı eklenirken hata: ${error.message}`);
+    }
+  });
+
+  const [showNewSubscriptionDialog, setShowNewSubscriptionDialog] = useState(false);
+  // Paket listesi için state (API'den çekilecek)
+  const [packages, setPackages] = useState<{id: number, package_name: string}[]>([]);
+
+  // Paket listesini çekmek için useEffect
+  useEffect(() => {
+    const fetchPackages = async () => {
+      try {
+        const response = await fetch(`${API_URL}/admin/packages-list`); // Bu endpoint'in var olduğunu varsayıyoruz
+        if (!response.ok) throw new Error('Paket listesi alınamadı');
+        const data = await response.json();
+        setPackages(data);
+      } catch (error) {
+        toast.error(`Paket listesi yüklenirken hata: ${error instanceof Error ? error.message : 'Bilinmeyen bir hata'}`);
+      }
+    };
+    fetchPackages();
+  }, []);
+
+  const addSubscriptionMutation = useMutation<unknown, Error, { package_id: number; start_date: string; end_date: string; user_id: string | undefined }>({
+    mutationFn: async (newSubscriptionData) => {
+      const response = await fetch(`${API_URL}/admin/members/${id}/subscriptions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newSubscriptionData)
+      });
+      if (!response.ok) throw new Error('Yeni abonelik eklenemedi');
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['member-details', id] });
+      toast.success('Yeni abonelik başarıyla eklendi.');
+      setShowNewSubscriptionDialog(false);
+    },
+    onError: (error) => {
+      toast.error(`Abonelik eklenirken hata: ${error.message}`);
+    }
+  });
+
+  if (memberDataLoading) return <div className="p-6">Yükleniyor...</div>;
+  if (memberDataError) return <div className="p-6 text-red-600">Hata: {memberDataError.message}</div>;
+  if (!memberQueryData) return <div className="p-6">Veri bulunamadı.</div>;
+
+  const { member, trades, apiKeys, notifications, subscriptions } = memberQueryData;
+
+  return (
+    <div style={{ padding: '0.5rem' }} className="space-y-6">
+      {/* Üst Bar */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="icon" onClick={() => navigate(-1)}>
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <h1 className="text-lg font-semibold">Üye Yönetimi</h1>
+        </div>
+        <Badge variant={member?.subscription_expires_at && new Date(member.subscription_expires_at) > new Date() ? "default" : "destructive"} className="text-xs">
+          {member?.subscription_expires_at && new Date(member.subscription_expires_at) > new Date() ? "Üyelik Var" : "Üyelik Yok"}
+        </Badge>
+      </div>
+
+      {/* Profil Bilgileri Formu */}
+      <Card className="p-2">
+        <CardHeader className="pb-2 px-2">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <User className="h-4 w-4" />
+              Profil Bilgileri
+            </CardTitle>
+            {!isEditingProfile ? (
+              <Button variant="outline" size="sm" onClick={() => setIsEditingProfile(true)}>
+                <Pencil className="w-3 h-3 mr-2" /> Düzenle
+              </Button>
+            ) : (
+              <div className="flex flex-col sm:flex-row gap-2">
+                <Button variant="outline" size="sm" onClick={() => {
+                  setIsEditingProfile(false);
+                  setProfileFormData(member);
+                }}>
+                  <XCircle className="w-3 h-3 mr-2" /> İptal
+                </Button>
+                <Button size="sm" onClick={handleProfileSave} disabled={profileUpdateMutation.isPending}>
+                  <Check className="w-3 h-3 mr-2" /> {profileUpdateMutation.isPending ? 'Kaydediliyor...' : 'Kaydet'}
+                </Button>
+              </div>
+            )}
+          </div>
+          <CardDescription className="text-xs">Üyenin tüm bilgilerini görüntüleyin ve düzenleyin.</CardDescription>
+        </CardHeader>
+        <CardContent className="px-2">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {/* Temel Bilgiler */}
+            <div className="space-y-3">
+              <div>
+                <Label htmlFor="username" className="text-xs">Kullanıcı Adı</Label>
+                <Input
+                  id="username"
+                  name="username"
+                  value={profileFormData.username || ''}
+                  onChange={handleProfileInputChange}
+                  disabled={!isEditingProfile}
+                  className="w-full text-sm h-8"
+                />
+              </div>
+              <div>
+                <Label htmlFor="full_name" className="text-xs">Ad Soyad</Label>
+                <Input
+                  id="full_name"
+                  name="full_name"
+                  value={profileFormData.full_name || ''}
+                  onChange={handleProfileInputChange}
+                  disabled={!isEditingProfile}
+                  className="w-full text-sm h-8"
+                />
+              </div>
+              <div>
+                <Label htmlFor="email" className="text-xs">E-posta</Label>
+                <Input
+                  id="email"
+                  name="email"
+                  type="email"
+                  value={profileFormData.email || ''}
+                  onChange={handleProfileInputChange}
+                  disabled={!isEditingProfile}
+                  className="w-full text-sm h-8"
+                />
+              </div>
+              <div>
+                <Label htmlFor="phone" className="text-xs">Telefon</Label>
+                <Input
+                  id="phone"
+                  name="phone"
+                  value={profileFormData.phone || ''}
+                  onChange={handleProfileInputChange}
+                  disabled={!isEditingProfile}
+                  className="w-full text-sm h-8"
+                />
+              </div>
+            </div>
+
+            {/* Üyelik Bilgileri */}
+            <div className="space-y-3">
+              <div>
+                <Label htmlFor="status" className="text-xs">Durum</Label>
+                <select
+                  id="status"
+                  name="status"
+                  value={profileFormData.status || 'active'}
+                  onChange={handleProfileInputChange}
+                  disabled={!isEditingProfile}
+                  className="w-full text-sm h-8 p-2 border rounded"
+                >
+                  <option value="active">Aktif</option>
+                  <option value="inactive">Pasif</option>
+                  <option value="banned">Yasaklı</option>
+                </select>
+              </div>
+              <div>
+                <Label htmlFor="language" className="text-xs">Dil</Label>
+                <select
+                  id="language"
+                  name="language"
+                  value={profileFormData.language || 'tr'}
+                  onChange={handleProfileInputChange}
+                  disabled={!isEditingProfile}
+                  className="w-full text-sm h-8 p-2 border rounded"
+                >
+                  <option value="tr">Türkçe</option>
+                  <option value="en">İngilizce</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="is_admin"
+                    name="is_admin"
+                    checked={profileFormData.is_admin || false}
+                    onChange={handleProfileInputChange}
+                    disabled={!isEditingProfile}
+                    className="rounded border-gray-300"
+                  />
+                  <Label htmlFor="is_admin" className="text-xs">Admin</Label>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="is_vip"
+                    name="is_vip"
+                    checked={profileFormData.is_vip || false}
+                    onChange={handleProfileInputChange}
+                    disabled={!isEditingProfile}
+                    className="rounded border-gray-300"
+                  />
+                  <Label htmlFor="is_vip" className="text-xs">VIP Üye</Label>
+                </div>
+              </div>
+            </div>
+
+            {/* Diğer Bilgiler */}
+            <div className="space-y-3">
+              <div>
+                <Label htmlFor="subscription_expires_at" className="text-xs">Abonelik Bitiş Tarihi</Label>
+                <Input
+                  id="subscription_expires_at"
+                  name="subscription_expires_at"
+                  type="datetime-local"
+                  value={profileFormData.subscription_expires_at ? format(new Date(profileFormData.subscription_expires_at), "yyyy-MM-dd'T'HH:mm") : ''}
+                  onChange={handleProfileInputChange}
+                  disabled={!isEditingProfile}
+                  className="w-full text-sm h-8"
+                />
+              </div>
+              <div>
+                <Label htmlFor="notes" className="text-xs">Notlar</Label>
+                <textarea
+                  id="notes"
+                  name="notes"
+                  value={profileFormData.notes || ''}
+                  onChange={handleProfileInputChange}
+                  disabled={!isEditingProfile}
+                  rows={3}
+                  className="w-full text-sm p-2 border rounded resize-none"
+                />
+              </div>
+              <div>
+                <Label className="text-xs">Son Giriş</Label>
+                <Input value={formatDate(member?.last_login)} disabled className="w-full text-sm h-8" />
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Son İşlemler Tablosu */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            <h2 className="text-base font-semibold">Son İşlemler</h2>
+          </div>
+          <Badge variant="outline" className="text-xs">{trades?.length || 0} işlem</Badge>
+        </div>
+        <p className="text-xs text-muted-foreground">Üyenin son 10 işlemi.</p>
+        <div className="border rounded-lg overflow-x-auto">
+          <Table>
+            <TableHeader className="bg-muted/50">
+              <TableRow>
+                {isMobileView ? (
+                  <>
+                    <TableHead className="px-2 py-2 text-xs">Ticket</TableHead>
+                    <TableHead className="px-2 py-2 text-xs">Sembol</TableHead>
+                    <TableHead className="px-2 py-2 text-xs">Yön</TableHead>
+                    <TableHead className="px-2 py-2 text-xs text-right">Açılış Fiyatı</TableHead>
+                    <TableHead className="px-2 py-2 text-xs text-right">Açılış Zamanı</TableHead>
+                    <TableHead className="px-2 py-2 text-xs w-6"></TableHead>
+                  </>
+                ) : (
+                  <>
+                    <TableHead className="w-[60px] px-2 py-2 text-xs">Ticket</TableHead>
+                    <TableHead className="px-2 py-2 text-xs">Sembol</TableHead>
+                    <TableHead className="px-2 py-2 text-xs">Yön</TableHead>
+                    <TableHead className="px-2 py-2 text-xs text-right">Açılış Fiyatı</TableHead>
+                    <TableHead className="px-2 py-2 text-xs text-right">Açılış Zamanı</TableHead>
+                    <TableHead className="px-2 py-2 text-xs text-right">Miktar</TableHead>
+                    <TableHead className="px-2 py-2 text-xs text-right">SL</TableHead>
+                    <TableHead className="px-2 py-2 text-xs text-right">TP</TableHead>
+                    <TableHead className="px-2 py-2 text-xs text-right">Kapanış Fiyatı</TableHead>
+                    <TableHead className="px-2 py-2 text-xs text-right">Kapanış Zamanı</TableHead>
+                    <TableHead className="px-2 py-2 text-xs text-right">Kâr/Zarar</TableHead>
+                    <TableHead className="px-2 py-2 text-xs flex-grow">Durum</TableHead>
+                  </>
+                )}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {trades && trades.length > 0 ? (
+                trades.map((trade) => (
+                  <React.Fragment key={trade.id}>
+                    <TableRow 
+                      className="text-xs cursor-pointer hover:bg-muted/50" 
+                      onClick={() => toggleRowExpansion(trade.id)}
+                    >
+                      {isMobileView ? (
+                        <>
+                          <TableCell className="font-medium px-2 py-1.5">{trade.ticket}</TableCell>
+                          <TableCell className="px-2 py-1.5">{trade.symbol}</TableCell>
+                          <TableCell className="px-2 py-1.5">
+                            <Badge className={`${trade.trend === "LONG" ? "bg-blue-100 text-blue-800 border-blue-300" : "bg-red-100 text-red-800 border-red-300"} px-1.5 py-0.5 text-[10px] rounded-full`}>
+                              {trade.trend === "LONG" ? "LONG" : "SHORT"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="px-2 py-1.5 text-right">
+                            {trade.open ? trade.open.toFixed(4) : '-'}
+                          </TableCell>
+                          <TableCell className="px-2 py-1.5 text-right">{formatDate(trade.opentime)}</TableCell>
+                          <TableCell className="px-2 py-1.5 text-center">
+                            {expandedRows[trade.id] ? <ChevronUp className="h-4 w-4"/> : <ChevronDown className="h-4 w-4"/>}
+                          </TableCell>
+                        </>
+                      ) : (
+                        <>
+                          <TableCell className="font-medium px-2 py-1.5">{trade.ticket}</TableCell>
+                          <TableCell className="px-2 py-1.5">{trade.symbol}</TableCell>
+                          <TableCell className="px-2 py-1.5">
+                            <Badge className={`${trade.trend === "LONG" ? "bg-blue-100 text-blue-800 border-blue-300" : "bg-red-100 text-red-800 border-red-300"} px-1.5 py-0.5 text-[10px] rounded-full`}>
+                              {trade.trend === "LONG" ? "LONG" : "SHORT"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="px-2 py-1.5 text-right">
+                            {trade.open ? trade.open.toFixed(4) : '-'}
+                          </TableCell>
+                          <TableCell className="px-2 py-1.5 text-right">{formatDate(trade.opentime)}</TableCell>
+                          <TableCell className="px-2 py-1.5 text-right">
+                            {trade.volume ? trade.volume.toFixed(2) : '-'}
+                          </TableCell>
+                          <TableCell className="px-2 py-1.5 text-right">
+                            {trade.sl ? trade.sl.toFixed(4) : '-'}
+                          </TableCell>
+                          <TableCell className="px-2 py-1.5 text-right">
+                            {trade.tp ? trade.tp.toFixed(4) : '-'}
+                          </TableCell>
+                          <TableCell className="px-2 py-1.5 text-right">
+                            {trade.close ? trade.close.toFixed(4) : '-'}
+                          </TableCell>
+                          <TableCell className="px-2 py-1.5 text-right">{formatDate(trade.closetime)}</TableCell>
+                          <TableCell className="px-2 py-1.5 text-right">
+                            {trade.profit ? trade.profit.toFixed(2) : '-'}
+                          </TableCell>
+                          <TableCell className="px-2 py-1.5">
+                            <Badge className={
+                              trade.status === "Tamamlandı" ? "bg-green-100 text-green-800 border-green-300" : 
+                              trade.status === "Hata" ? "bg-red-100 text-red-800 border-red-300" : 
+                              "bg-yellow-100 text-yellow-800 border-yellow-300" + " px-1.5 py-0.5 text-[10px] rounded-full"
+                            }>
+                              {trade.status}
+                            </Badge>
+                          </TableCell>
+                        </>
+                      )}
+                    </TableRow>
+                    {isMobileView && expandedRows[trade.id] && (
+                      <TableRow className="text-xs bg-muted/20">
+                        <TableCell colSpan={6} className="px-3 py-2">
+                          <div className="space-y-1 text-[11px]">
+                            <div><span className="font-medium">Miktar:</span> {trade.volume?.toFixed(2) || '-'}</div>
+                            <div><span className="font-medium">SL:</span> {trade.sl?.toFixed(4) || '-'}</div>
+                            <div><span className="font-medium">TP:</span> {trade.tp?.toFixed(4) || '-'}</div>
+                            <div><span className="font-medium">Kapanış Fiyatı:</span> {trade.close?.toFixed(4) || '-'}</div>
+                            <div><span className="font-medium">Kapanış Zamanı:</span> {trade.closetime ? formatDate(trade.closetime) : '-'}</div>
+                            <div><span className="font-medium">Kâr/Zarar:</span> {trade.profit?.toFixed(2) || '-'}</div>
+                            <div><span className="font-medium">Durum:</span> {trade.status}</div>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </React.Fragment>
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={isMobileView ? 6 : 12} className="text-center py-4 text-muted-foreground">
+                    Henüz işlem bulunmuyor.
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+
+      {/* Diğer Kartlar (API Anahtarları, Bildirimler, Abonelikler) buraya gelecek... */}
+       {/* API Anahtarları */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center gap-2">
+              <Key className="w-5 h-5" /> API Anahtarları
+            </CardTitle>
+            <Dialog>
+              <DialogTrigger asChild>
+                <Button variant="outline" size="sm"><Plus className="w-4 h-4 mr-2" /> Yeni API Ekle</Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Yeni API Anahtarı Ekle</DialogTitle>
+                  <DialogDescription>
+                    Lütfen API anahtarı bilgilerini girin.
+                  </DialogDescription>
+                </DialogHeader>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  const formData = new FormData(e.currentTarget);
+                  const newApiKey = {
+                    user_id: id,
+                    api_name: formData.get('api_name') as string,
+                    api_key: formData.get('api_key') as string,
+                    api_secret: formData.get('api_secret') as string,
+                    api_type: parseInt(formData.get('api_type') as string, 10),
+                    bot_room: parseInt(formData.get('bot_room') as string, 10) || 0,
+                  };
+                  addApiKeyMutation.mutate(newApiKey);
+                }}>
+                  <div className="grid gap-4 py-4">
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="api_name" className="text-right">API Adı</Label>
+                      <Input id="api_name" name="api_name" className="col-span-3" required />
+                    </div>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="api_key" className="text-right">API Key</Label>
+                      <Input id="api_key" name="api_key" className="col-span-3" required />
+                    </div>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="api_secret" className="text-right">API Secret</Label>
+                      <Input id="api_secret" name="api_secret" type="password" className="col-span-3" required />
+                    </div>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="api_type" className="text-right">API Tipi</Label>
+                      <select id="api_type" name="api_type" className="col-span-3 w-full p-2 border rounded" defaultValue="1">
+                        <option value="1">Binance</option>
+                        <option value="2">Bybit</option>
+                        <option value="3">Bingx</option>
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="bot_room" className="text-right">Bot Odası ID</Label>
+                      <Input id="bot_room" name="bot_room" type="number" className="col-span-3" placeholder="Opsiyonel"/>
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button type="submit" disabled={addApiKeyMutation.isPending}>
+                      {addApiKeyMutation.isPending ? 'Ekleniyor...': 'Kaydet'}
+                    </Button>
+                  </DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
+          </div>
+          <CardDescription>Üyenin API anahtarlarını yönetin.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b font-medium">
+                  <th className="text-left p-2">API Adı</th>
+                  <th className="text-left p-2">API Key (Kısmi)</th>
+                  <th className="text-left p-2">Oluşturma Tarihi</th>
+                  <th className="text-center p-2">Durum</th>
+                  <th className="text-right p-2">İşlemler</th>
+                </tr>
+              </thead>
+              <tbody>
+                {apiKeys?.map((key) => (
+                  <tr key={key.id} className="border-b hover:bg-muted/50">
+                    <td className="p-2 font-medium">{key.api_name}</td>
+                    <td className="p-2">{key.api_key?.substring(0, 8)}...</td>
+                    <td className="p-2">{formatDate(key.created_at)}</td>
+                    <td className="p-2 text-center">
+                      <Badge variant={key.status ? 'default' : 'secondary'} className="px-2 py-0.5 text-xs">
+                        {key.status ? 'Aktif' : 'Pasif'}
+                      </Badge>
+                    </td>
+                    <td className="p-2 text-right">
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button variant="ghost" size="icon" onClick={() => setApiKeyToDelete(key.id)}>
+                            <Trash2 className="w-4 h-4 text-destructive" />
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>API Anahtarı Silme</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              Bu API anahtarını silmek istediğinize emin misiniz? Bu işlem geri alınamaz.
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel onClick={() => setApiKeyToDelete(null)}>Vazgeç</AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={() => apiKeyToDelete && deleteApiKeyMutation.mutate(apiKeyToDelete)}
+                              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                            >
+                              <Trash2 className="w-4 h-4 mr-2" />
+                              Sil
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    </td>
+                  </tr>
+                ))}
+                {(!apiKeys || apiKeys.length === 0) && (
+                  <tr>
+                    <td colSpan={5} className="p-4 text-center text-muted-foreground">
+                      Henüz API anahtarı bulunmuyor.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Bildirimler */}
+      <Card>
+        <CardHeader>
+         <CardTitle className="flex items-center gap-2">
+            <Bell className="w-5 h-5" /> Bildirimler
+          </CardTitle>
+          <CardDescription>Üyeye gönderilen son bildirimler (son 5).</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {notifications?.length > 0 ? (
+            <ul className="space-y-3">
+              {notifications.map((notification) => (
+                <li key={notification.id} className="p-3 border rounded-md bg-muted/30 hover:bg-muted/50">
+                  <p className="text-sm text-foreground">{notification.message}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Gönderim Durumu: {notification.sent_status === 1 ? 'Gönderildi' : notification.sent_status === 0 ? 'Bekliyor' : 'Hata'} 
+                    {notification.created_at && ` - ${formatDate(notification.created_at)}`}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted-foreground text-center py-4">Henüz bildirim bulunmuyor.</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Abonelikler */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center gap-2">
+              <CreditCard className="w-5 h-5" /> Abonelikler
+            </CardTitle>
+            <Dialog open={showNewSubscriptionDialog} onOpenChange={setShowNewSubscriptionDialog}>
+              <DialogTrigger asChild>
+                <Button variant="outline" size="sm"><Plus className="w-4 h-4 mr-2" /> Yeni Abonelik Ekle</Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Yeni Abonelik Ekle</DialogTitle>
+                  <DialogDescription>
+                    Lütfen abonelik bilgilerini girin.
+                  </DialogDescription>
+                </DialogHeader>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  const formData = new FormData(e.currentTarget);
+                  const newSubscription = {
+                    user_id: id,
+                    package_id: parseInt(formData.get('package_id') as string, 10),
+                    start_date: formData.get('start_date') as string,
+                    end_date: formData.get('end_date') as string,
+                  };
+                  addSubscriptionMutation.mutate(newSubscription);
+                }}>
+                  <div className="grid gap-4 py-4">
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="package_id" className="text-right">Paket</Label>
+                      <select id="package_id" name="package_id" className="col-span-3 w-full p-2 border rounded" required>
+                        <option value="">Paket Seçiniz...</option>
+                        {packages.map(pkg => (
+                          <option key={pkg.id} value={pkg.id}>{pkg.package_name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="start_date" className="text-right">Başlangıç Tarihi</Label>
+                      <Input id="start_date" name="start_date" type="date" className="col-span-3" required />
+                    </div>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="end_date" className="text-right">Bitiş Tarihi</Label>
+                      <Input id="end_date" name="end_date" type="date" className="col-span-3" required />
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button type="submit" disabled={addSubscriptionMutation.isPending}>
+                      {addSubscriptionMutation.isPending ? 'Ekleniyor...' : 'Kaydet'}
+                    </Button>
+                  </DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
+          </div>
+          <CardDescription>Üyenin aktif ve geçmiş abonelikleri.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b font-medium">
+                  <th className="text-left p-2">Paket Adı</th>
+                  <th className="text-left p-2">Başlangıç Tarihi</th>
+                  <th className="text-left p-2">Bitiş Tarihi</th>
+                  <th className="text-center p-2">Durum</th>
+                  <th className="text-right p-2">İşlemler</th>
+                </tr>
+              </thead>
+              <tbody>
+                {subscriptions?.map((sub) => (
+                  <tr key={sub.id} className="border-b hover:bg-muted/50">
+                    <td className="p-2 font-medium">{sub.package_name}</td>
+                    <td className="p-2">{formatDate(sub.start_date)}</td>
+                    <td className="p-2">{formatDate(sub.end_date)}</td>
+                    <td className="p-2 text-center">
+                      <Badge variant={new Date(sub.end_date) > new Date() ? 'default' : 'secondary'} className="px-2 py-0.5 text-xs">
+                        {new Date(sub.end_date) > new Date() ? 'Aktif' : 'Sona Erdi'} 
+                        {/* API'den status geliyorsa: sub.status === 'active' ? 'Aktif' ... */}
+                      </Badge>
+                    </td>
+                    <td className="p-2 text-right">
+                      {new Date(sub.end_date) > new Date() && (
+                        <Button variant="ghost" size="icon" onClick={() => cancelSubscriptionMutation.mutate(sub.id)} disabled={cancelSubscriptionMutation.isPending}>
+                          <XCircle className="w-4 h-4 text-destructive" />
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {(!subscriptions || subscriptions.length === 0) && (
+                  <tr>
+                    <td colSpan={5} className="p-4 text-center text-muted-foreground">
+                      Henüz abonelik bulunmuyor.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+
+    </div>
+  );
+}
+
+export default ManageMember; 

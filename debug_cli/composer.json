@@ -1,0 +1,6 @@
+{
+    "require": {
+        "danog/madelineproto": "^8.4",
+        "jaggedsoft/php-binance-api": "^0.5.30"
+    }
+}

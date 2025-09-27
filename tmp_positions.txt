@@ -1,0 +1,1 @@
+2025-07-09 06:17:58 | - | Symbol: MAGICUSDT | Position: -34.6 | Entry: 0.1733 | PNL: -0.03806000 | Leverage: 20 | Side: BOTH | IsolatedMargin: 0.26696841 | Liquidation: 0.18031272 | Mark: 0.17440000 | MarginType: isolated

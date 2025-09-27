@@ -1,0 +1,33 @@
+# Çalışma Kuralları
+
+- Kodun yapısal bütünlüğünü asla bozma, mevcut mimariye sadık kal.
+- Sadece iyileştirme, refaktör veya ekleme yap; gereksiz kod üretme.
+- Kullanıcının istediği değişikliği doğrudan uygula, onay isteme, bekleme.
+- Eksik bilgi varsa, önceki bağlama veya standart yazılım pratiklerine göre en mantıklı kararı ver.
+- Hatalı veya riskli bir işlem gerekiyorsa, kısa bir uyarı yap ve düzeltmeyi onay beklemeden uygula.
+- Kod bütünlüğü, okunabilirlik, işlevsellik ve genişletilebilirlik önceliklidir.
+- Belirsizlikte hızlı karar ver, gerekiyorsa kullanıcıya bir kez net soru sor, aynı konuda tekrar sorma.
+- Gereksiz açıklama yapma, varsayılan olarak sessiz ve odaklı çalış.
+- Uzun işleri parçalara böl, her adım sonrası bir sonraki adıma geç.
+- Kullanıcının zamanına saygı göster, lafı dolandırma, direkt çözüme geç.
+- Sadece söylenen dosyada değişiklik yap, başka dosyalara müdahale etme.
+- Mevcut kodları ve yapıları bozma, önemli değişiklik gerekiyorsa önce sor.
+- Dosya değişikliklerini tek seferde, toplu olarak yap.
+- Dosya linklerini gerçek dosya olarak ver, x.md gibi sahte dosya isimleri kullanma.
+- Uygulama Windows terminal cmd.exe üzerinde çalışır.
+- Yanıtlarını Türkçe olarak ver.
+- Kullanıcıdan uygulama ile ilgili onay isteme, yapılması gerekeni yap ve devam et.
+- Bir dosyada yapılan değişiklikler veya eklenen kodlar 500 satırı geçerse, dosyayı ikiye böl, kodları mantıklı şekilde ayır ve ana dosyaya uygun şekilde import et.
+- Her bir güncelleme yapmadan önce kodun en son halini GitHub'a commit ve push et.
+- Kod incelemesi (Code Review): Büyük veya kritik değişikliklerde, mümkünse bir başkasının kodu incelemesini sağla.
+- Test yazma zorunluluğu: Yeni özellik veya hata düzeltmesi eklerken ilgili birim/test dosyalarını da güncelle.
+- Açık ve anlaşılır commit mesajları: Her commit mesajı kısa, öz ve yapılan değişikliği net şekilde açıklamalı.
+- Versiyonlama ve tag kullanımı: Önemli sürümlerde veya büyük değişikliklerde repo üzerinde tag kullan.
+- Dokümantasyon güncelliği: Yeni fonksiyon, sınıf veya modül eklerken ilgili dokümantasyonu da güncelle.
+- Gizli bilgi ve anahtarların korunması: API anahtarları, şifreler gibi hassas bilgileri asla repoya ekleme, .env gibi dosyaları .gitignore'a ekle.
+- Otomatik test ve CI/CD: Mümkünse her push sonrası otomatik testlerin çalışmasını sağla, testler geçmeden merge etme.
+- Kod standartlarına uyum: Projede belirlenen kodlama standartlarına (örn. PEP8, ESLint) mutlaka uy.
+- Performans ve güvenlik kontrolleri: Özellikle dışa açık fonksiyonlarda güvenlik ve performans açısından kodu gözden geçir.
+- Geriye dönük uyumluluk: Mevcut kullanıcıları veya sistemleri bozacak değişikliklerden kaçın, gerekiyorsa uyumluluk katmanı ekle.
+- SQL sorguları ve API endpointleri gibi önemli sorguları mutlaka teyit et, öyle kaydet.
+- Özellikle SQL sorgularında kafadan sallama/uydurma değişkenler kullanarak sorgu yazma. 

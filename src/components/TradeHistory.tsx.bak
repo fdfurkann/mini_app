@@ -1,0 +1,1113 @@
+import React, { useState, useEffect, useMemo } from "react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { OrderSide, Trade, Exchange } from "@/utils/types";
+import { getUserSignals, UserSignal, getUserByTelegramId, getApiKeys, ApiKey, createSignal } from "@/services/api";
+import { ArrowDown, ArrowUp, Search, MoreVertical, Calendar, Download, BarChart2, Loader2, ChevronLeft, ChevronRight, Plus, Edit, Trash, ChevronDown, ChevronUp } from "lucide-react";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
+import { useT } from '@/utils/locales';
+import { cn } from "@/lib/utils";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  AlertTriangle,
+} from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Label } from "@/components/ui/label";
+
+const COLORS = ["hsl(var(--primary))", "hsl(var(--signal-success))", "hsl(var(--signal-warning))", "hsl(var(--signal-danger))"];
+
+// API tiplerini enum olarak tanımlayalım
+enum ApiType {
+  BINANCE = 1,
+  BYBIT = 2,
+  BINGX = 3
+}
+
+// API tiplerini isimlerle eşleştirelim
+const API_TYPE_NAMES = {
+  [ApiType.BINANCE]: "Binance",
+  [ApiType.BYBIT]: "Bybit",
+  [ApiType.BINGX]: "BingX"
+};
+
+// Arayüzde kullanılacak olan Trade tipi (Tablo Sütunlarına Göre)
+interface TradeData {
+  ticket: number; // signal.id
+  symbol: string; // signal.symbol
+  side: "BUY" | "SELL"; // signal.trend
+  openPrice: number | undefined; // signal.open
+  openTime: string; // signal.opentime
+  volume: number | undefined; // signal.volume
+  sl: number | undefined; // signal.sl
+  tp: number | undefined; // signal.tp
+  closePrice: number | undefined; // signal.close
+  closeTime: string; // signal.closetime
+  profit: number | undefined; // signal.profit
+  status: string; // Metinsel durum (Açık, Hatalı vb.)
+  statusCode: number; // Sayısal durum (0, 1, 2, 3)
+  apiName: string; // API Anahtarı Adı (apiKeysMap ile bulunur)
+  event?: string; // Hata mesajı için (signal.event)
+}
+
+// Helper function to format dates
+const formatDate = (dateStr: string) => {
+  if (!dateStr) return "-";
+  try {
+    const date = new Date(dateStr);
+    return date.toLocaleString('tr-TR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } catch (e) {
+    return dateStr;
+  }
+};
+
+const ITEMS_PER_PAGE = 30; // Sabit olarak tanımla
+
+// Helper function to prepare data for the profit chart
+const calculateProfitChartData = (trades: TradeData[]) => {
+  // 1. Filter for completed trades with valid closeTime and profit
+  const validCompletedTrades = trades
+    .filter(t => 
+        t.status === "Tamamlandı" && 
+        t.closeTime && 
+        t.profit !== undefined &&
+        !isNaN(new Date(t.closeTime).getTime()) // Ensure closeTime is a valid date
+    )
+    // Add Date object for sorting
+    .map(t => ({ ...t, closeDate: new Date(t.closeTime!) }))
+    // 2. Sort by close date
+    .sort((a, b) => a.closeDate.getTime() - b.closeDate.getTime());
+
+  if (validCompletedTrades.length === 0) {
+    return { chartData: [], apiNames: [] };
+  }
+
+  // 3. Extract unique API names
+  const apiNames = [...new Set(validCompletedTrades.map(t => t.apiName))];
+
+  // 4. Calculate cumulative profit over time using a Map to handle same timestamps
+  const cumulativeProfits: Record<string, number> = {};
+  apiNames.forEach(name => cumulativeProfits[name] = 0);
+
+  const chartDataMap = new Map<number, any>();
+
+  validCompletedTrades.forEach(trade => {
+    cumulativeProfits[trade.apiName] += trade.profit!; // profit is checked in filter
+    
+    const timestamp = trade.closeDate.getTime();
+    const dataPoint: any = {
+      timestamp: timestamp, // Store timestamp for potential later formatting
+      // Use formatted date string for the chart axis label
+      name: formatDate(trade.closeTime!) // Use formatted date for display
+    };
+    
+    // Add current cumulative profit for all known APIs
+    apiNames.forEach(name => {
+        dataPoint[name] = cumulativeProfits[name];
+    });
+
+    // Overwrite entry for the same timestamp to keep the latest cumulative values
+    chartDataMap.set(timestamp, dataPoint);
+  });
+
+  // 5. Convert map values to array and sort by timestamp (Map preserves insertion order, but sorting is safer)
+  const chartData = Array.from(chartDataMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+
+  return { chartData, apiNames };
+};
+
+const TradeHistory: React.FC = () => {
+  const [trades, setTrades] = useState<TradeData[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [exchangeFilter, setExchangeFilter] = useState<string>("all");
+  const [timeRange, setTimeRange] = useState<string>("all");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [selectedTrade, setSelectedTrade] = useState<TradeData | null>(null);
+  const [formData, setFormData] = useState<TradeData>({
+    ticket: 0,
+    symbol: "",
+    side: "BUY",
+    openPrice: undefined,
+    openTime: "",
+    volume: undefined,
+    sl: undefined,
+    tp: undefined,
+    closePrice: undefined,
+    closeTime: "",
+    profit: undefined,
+    status: "Açık",
+    statusCode: 0,
+    apiName: "",
+  });
+  const [isMobileView, setIsMobileView] = useState(window.innerWidth < 768);
+  const [expandedRows, setExpandedRows] = useState<Record<number, boolean>>({});
+  const [isAddSignalDialogOpen, setIsAddSignalDialogOpen] = useState(false);
+  const [signalFormData, setSignalFormData] = useState({
+    symbol: "",
+    trend: "BUY",
+    slPercentage: "",
+    entryRangePercentage: "",
+    tpCount: "1",
+    tpRangePercentage: "",
+  });
+
+  const t = useT();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const handleResize = () => {
+      const screenWidth = window.innerWidth;
+      setIsMobileView(screenWidth < 768);
+    };
+
+    window.addEventListener("resize", handleResize);
+    handleResize(); // Call once to set initial states
+
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useEffect(() => {
+    fetchTrades();
+  }, []);
+
+  // Log unique symbols and apiNames after trades state updates
+  useEffect(() => {
+    if (trades.length > 0) {
+      const uniqueSymbols = [...new Set(trades.map(t => t.symbol))];
+      const uniqueApiNames = [...new Set(trades.map(t => t.apiName))];
+      console.log("Mevcut Semboller:", uniqueSymbols);
+      console.log("Mevcut API Adları:", uniqueApiNames);
+    }
+  }, [trades]); // Run when trades state changes
+
+  const fetchTrades = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      const telegramId = sessionStorage.getItem('telegramId');
+      if (!telegramId) {
+        throw new Error('Oturum bilgisi bulunamadı');
+      }
+
+      const user = await getUserByTelegramId(telegramId);
+      if (!user) {
+        throw new Error('Kullanıcı bulunamadı');
+      }
+      
+      const apiKeys = await getApiKeys(user.id);
+      const apiKeysMap = apiKeys.reduce((acc: Record<number, ApiKey>, apiKey: ApiKey) => {
+        acc[apiKey.id] = apiKey;
+        return acc;
+      }, {});
+      
+      const signals = await getUserSignals(user.id);
+      
+      if (!signals || signals.length === 0) {
+        setTrades([]); 
+        setLoading(false);
+        return;
+      }
+
+      const formattedTrades: TradeData[] = signals.map((signal: UserSignal) => {
+        const apiKey = signal.api_id ? apiKeysMap[signal.api_id] : null;
+        const apiName = apiKey?.api_name || "Unknown";
+        
+        const getNumber = (value: any): number | undefined => {
+          if (value === null || value === undefined || value === '') return undefined;
+          const num = Number(value);
+          return isNaN(num) ? undefined : num;
+        };
+
+        const getString = (value: any, defaultValue = ""): string => {
+          return value ? String(value) : defaultValue;
+        };
+        
+        const side = getString(signal.trend) === "LONG" ? "BUY" : "SELL";
+        
+        const statusNum = getNumber(signal.status) ?? 0; // Eğer status null ise 0 (Bekliyor) varsay.
+        let statusText = "Bilinmeyen";
+        switch (statusNum) {
+            case 0: statusText = "Bekliyor"; break;
+            case 1: statusText = "Açık"; break;
+            case 2: statusText = "Tamamlandı"; break;
+            case 3: statusText = "Hatalı"; break;
+        }
+        
+        return {
+          ticket: signal.id,
+          symbol: getString(signal.symbol), 
+          side: side,
+          openPrice: getNumber(signal.open), 
+          openTime: getString(signal.opentime), 
+          volume: getNumber(signal.volume), 
+          sl: getNumber(signal.sl), 
+          tp: getNumber(signal.tp), 
+          closePrice: getNumber(signal.close), 
+          closeTime: getString(signal.closetime), 
+          profit: getNumber(signal.profit), 
+          status: statusText,
+          statusCode: statusNum,
+          apiName: apiName,
+          event: getString(signal.event)
+        };
+      });
+
+      setTrades(formattedTrades);
+
+    } catch (err) {
+      setError("İşlem geçmişi yüklenirken bir hata oluştu.");
+      console.error("İşlem geçmişi yüklenirken hata:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggleRowExpansion = (ticket: number) => {
+    setExpandedRows(prev => ({ ...prev, [ticket]: !prev[ticket] }));
+  };
+
+  // Filter trades based on selected exchange
+  const filteredTrades = useMemo(() => {
+    let filtered = trades;
+
+    if (searchTerm.trim()) {
+      const searchLower = searchTerm.toLowerCase().trim();
+      filtered = filtered.filter(trade => 
+        trade.symbol.toLowerCase().includes(searchLower) ||
+        trade.ticket.toString().includes(searchLower) ||
+        trade.apiName.toLowerCase().includes(searchLower) ||
+        trade.status.toLowerCase().includes(searchLower)
+      );
+    }
+
+    const now = new Date();
+    if (timeRange !== 'all') {
+      const timeRangeInDays = timeRange === '1d' ? 1 : timeRange === '7d' ? 7 : 30;
+      const cutoffDate = new Date(now.getTime() - (timeRangeInDays * 24 * 60 * 60 * 1000));
+      
+      filtered = filtered.filter(trade => {
+        const tradeDate = new Date(trade.openTime);
+        return tradeDate >= cutoffDate;
+      });
+    }
+
+    if (exchangeFilter !== 'all') {
+      filtered = filtered.filter(trade => trade.apiName === exchangeFilter);
+    }
+    
+    return filtered;
+  }, [trades, exchangeFilter, timeRange, searchTerm]);
+
+  const handleExchangeChange = (value: string) => {
+    setExchangeFilter(value);
+  };
+
+  const { chartData: profitChartData, apiNames: profitChartApiNames } = calculateProfitChartData(filteredTrades);
+
+  const totalTrades = filteredTrades.length;
+  const completedTrades = filteredTrades.filter(t => t.status === "Tamamlandı");
+  const profitableTrades = completedTrades.filter(t => t.profit !== undefined && t.profit > 0).length;
+  const totalPnL = completedTrades.reduce((sum, t) => sum + (t.profit || 0), 0);
+  const winRate = completedTrades.length > 0 ? (profitableTrades / completedTrades.length) * 100 : 0;
+
+  const totalPages = Math.ceil(filteredTrades.length / ITEMS_PER_PAGE);
+  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+  const endIndex = startIndex + ITEMS_PER_PAGE;
+  const paginatedTrades = filteredTrades.slice(startIndex, endIndex);
+
+  const goToPreviousPage = () => {
+    setCurrentPage((prev) => Math.max(prev - 1, 1));
+  };
+
+  const goToNextPage = () => {
+    setCurrentPage((prev) => Math.min(prev + 1, totalPages));
+  };
+
+  const openEditDialog = (trade: TradeData) => {
+    setSelectedTrade(trade);
+    setFormData({
+      ticket: trade.ticket,
+      symbol: trade.symbol,
+      side: trade.side,
+      openPrice: trade.openPrice,
+      openTime: trade.openTime,
+      volume: trade.volume,
+      sl: trade.sl,
+      tp: trade.tp,
+      closePrice: trade.closePrice,
+      closeTime: trade.closeTime,
+      profit: trade.profit,
+      status: trade.status,
+      statusCode: trade.statusCode,
+      apiName: trade.apiName,
+    });
+    setIsEditDialogOpen(true);
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+  };
+
+  const handleSelectChange = (value: string) => {
+    setFormData(prev => ({ ...prev, side: value as "BUY" | "SELL" }));
+  };
+
+  const handleEditTrade = () => {
+    if (selectedTrade) {
+      const updatedTrades = trades.map(trade =>
+        trade.ticket === selectedTrade.ticket ? formData : trade
+      );
+      setTrades(updatedTrades);
+      setIsEditDialogOpen(false);
+    }
+  };
+
+  const openDeleteDialog = (trade: TradeData) => {
+    setSelectedTrade(trade);
+    setIsDeleteDialogOpen(true);
+  };
+
+  const handleDeleteTrade = () => {
+    if (selectedTrade) {
+      const updatedTrades = trades.filter(trade => trade.ticket !== selectedTrade.ticket);
+      setTrades(updatedTrades);
+      setIsDeleteDialogOpen(false);
+    }
+  };
+
+  const handleSignalFormSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const telegramId = sessionStorage.getItem('telegramId');
+      if (!telegramId) {
+        throw new Error('Oturum bilgisi bulunamadı');
+      }
+
+      const user = await getUserByTelegramId(telegramId);
+      if (!user) {
+        throw new Error('Kullanıcı bulunamadı');
+      }
+
+      await createSignal(user.id, {
+        symbol: signalFormData.symbol,
+        trend: signalFormData.trend as "BUY" | "SELL",
+        slPercentage: parseFloat(signalFormData.slPercentage),
+        entryRangePercentage: parseFloat(signalFormData.entryRangePercentage),
+        tpCount: parseInt(signalFormData.tpCount),
+        tpRangePercentage: parseFloat(signalFormData.tpRangePercentage),
+      });
+
+      // Sinyal başarıyla oluşturuldu, formu sıfırla ve kapat
+      setSignalFormData({
+        symbol: "",
+        trend: "BUY",
+        slPercentage: "",
+        entryRangePercentage: "",
+        tpCount: "1",
+        tpRangePercentage: "",
+      });
+      setIsAddSignalDialogOpen(false);
+      
+      // İşlem listesini güncelle
+      await fetchTrades();
+    } catch (error) {
+      console.error("Sinyal eklenirken hata:", error);
+      // Hata mesajını kullanıcıya göster
+      setError("Sinyal eklenirken bir hata oluştu");
+    }
+  };
+
+  const handleSignalInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    setSignalFormData(prev => ({ ...prev, [name]: value }));
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center items-center h-[400px]">
+        <div className="flex flex-col items-center">
+          <Loader2 className="w-6 h-6 animate-spin text-primary mb-2" />
+          <p className="text-muted-foreground">{t('loading')}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-[400px]">
+        <p className="text-red-500 mb-4">{error}</p>
+        <Button onClick={fetchTrades} variant="outline" size="sm">
+          {t('retry')}
+        </Button>
+      </div>
+    );
+  }
+
+  console.log("Render öncesi trades state:", trades);
+  console.log("Render öncesi filteredTrades:", filteredTrades);
+  console.log("Render öncesi paginatedTrades:", paginatedTrades);
+  console.log(`Sayfa: ${currentPage}/${totalPages}`);
+
+  console.log("Seçilen Borsa:", exchangeFilter);
+  console.log("Filtrelenmiş Sinyaller:", filteredTrades);
+
+  return (
+    <div className="space-y-6">
+      {isMobileView && (
+        <></>
+      )}
+
+      <div className="main-content">
+        <div className="space-y-4 overflow-x-auto">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold">{t('tradeHistory')}</h2>
+            <div className="flex gap-2">
+              <Button 
+                onClick={() => setIsAddSignalDialogOpen(true)}
+                className="bg-primary text-primary-foreground hover:bg-primary/90"
+              >
+                <Plus className="w-4 h-4 mr-1" />
+                {t('addSignal')}
+              </Button>
+              <Select value={timeRange} onValueChange={setTimeRange}>
+                <SelectTrigger className="w-36">
+                  <SelectValue placeholder={t('timeRange')} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1d">{t('last24Hours')}</SelectItem>
+                  <SelectItem value="7d">{t('last7Days')}</SelectItem>
+                  <SelectItem value="30d">{t('last30Days')}</SelectItem>
+                  <SelectItem value="all">{t('allTime')}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {/* İstatistikler */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+            <Card className="dashboard-card w-full min-w-0">
+              <CardHeader className="p-2 pb-1">
+                <CardTitle className="text-sm font-medium overflow-hidden text-ellipsis whitespace-nowrap">{t('totalTrades')}</CardTitle>
+              </CardHeader>
+              <CardContent className="p-2 pt-0">
+                <div className="stat-value min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{totalTrades}</div>
+                <div className="stat-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{t('allExchanges')}</div>
+              </CardContent>
+            </Card>
+
+            <Card className="dashboard-card min-w-0 w-full">
+              <CardHeader className="p-2 pb-1">
+                <CardTitle className="text-sm font-medium overflow-hidden text-ellipsis whitespace-nowrap">{t('winRate')}</CardTitle>
+              </CardHeader>
+              <CardContent className="p-2 pt-0">
+                <div className="stat-value min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{winRate.toFixed(1)}%</div>
+                <div className="stat-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{t('profitableTrades')}</div>
+              </CardContent>
+            </Card>
+
+            <Card className="dashboard-card min-w-0 w-full">
+              <CardHeader className="p-2 pb-1">
+                <CardTitle className="text-sm font-medium overflow-hidden text-ellipsis whitespace-nowrap">{t('totalPnL')}</CardTitle>
+              </CardHeader>
+              <CardContent className="p-2 pt-0">
+                <div className={`stat-value min-w-0 overflow-hidden text-ellipsis whitespace-nowrap ${totalPnL >= 0 ? 'text-signal-success' : 'text-signal-danger'}`}>
+                  {totalPnL >= 0 ? '+' : ''}{totalPnL.toFixed(2)} USDT
+                </div>
+                <div className="stat-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{t('realizedPnL')}</div>
+              </CardContent>
+            </Card>
+
+            <Card className="dashboard-card min-w-0 w-full">
+              <CardHeader className="p-2 pb-1">
+                <CardTitle className="text-sm font-medium overflow-hidden text-ellipsis whitespace-nowrap">{t('averageTrade')}</CardTitle>
+              </CardHeader>
+              <CardContent className="p-2 pt-0">
+                <div className={`stat-value min-w-0 overflow-hidden text-ellipsis whitespace-nowrap ${(completedTrades.length > 0 ? totalPnL / completedTrades.length : 0) >= 0 ? 'text-signal-success' : 'text-signal-danger'}`}>
+                  {completedTrades.length > 0 ? 
+                    ((totalPnL / completedTrades.length) >= 0 ? '+' : '' ) + (totalPnL / completedTrades.length).toFixed(2) 
+                    : '0.00'} USDT
+                </div>
+                <div className="stat-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{t('perCompletedTrade')}</div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {trades.length === 0 ? (
+            <Card className="p-8 flex flex-col items-center justify-center">
+              <p className="text-muted-foreground mb-2">{t('noTradeRecord')}</p>
+              <p className="text-xs text-muted-foreground">{t('tradesWillBeListed')}</p>
+            </Card>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 gap-2">
+                <Card className="dashboard-card w-full">
+                  <CardHeader className="p-2 pb-0">
+                    <CardTitle className="text-sm">{t('cumulativeProfitLoss')}</CardTitle>
+                    <CardDescription className="text-xs">{t('profitLossByApi')}</CardDescription>
+                  </CardHeader>
+                  <CardContent className="p-2">
+                    <div className="w-full h-64 md:h-80">
+                      {profitChartData.length > 0 ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={profitChartData}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                            <XAxis 
+                              dataKey="name"
+                              stroke="hsl(var(--muted-foreground))"
+                              fontSize={10}
+                              tickLine={false}
+                              axisLine={false}
+                            />
+                            <YAxis 
+                              stroke="hsl(var(--muted-foreground))"
+                              fontSize={10}
+                              tickLine={false}
+                              axisLine={false}
+                              tickFormatter={(value) => `${value} USDT`}
+                            />
+                            <RechartsTooltip 
+                              formatter={(value: number) => [`${value.toFixed(2)} USDT`, undefined]}
+                              labelFormatter={(label) => `Tarih: ${label}`}
+                              contentStyle={{ 
+                                backgroundColor: 'hsl(var(--card))', 
+                                borderColor: 'hsl(var(--border))',
+                                color: 'hsl(var(--card-foreground))'
+                              }}
+                            />
+                            <Legend 
+                              wrapperStyle={{ fontSize: '10px' }} 
+                              verticalAlign="top" 
+                              align="right" 
+                              height={30}
+                            />
+                            {profitChartApiNames.map((apiName, index) => (
+                              <Line 
+                                key={apiName} 
+                                type="monotone" 
+                                dataKey={apiName} 
+                                stroke={COLORS[index % COLORS.length]} 
+                                strokeWidth={2}
+                                dot={false}
+                                name={apiName}
+                              />
+                            ))}
+                          </LineChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <div className="flex items-center justify-center h-full">
+                          <p className="text-xs text-muted-foreground">{t('notEnoughData')}</p>
+                        </div>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2 items-center justify-between">
+                <div className="relative w-full sm:w-72">
+                  <Search className="absolute left-2 top-2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder={t('tradeSearch')}
+                    className="pl-8"
+                    value={searchTerm}
+                    onChange={(e) => {
+                      const newSearchTerm = e.target.value;
+                      setSearchTerm(newSearchTerm);
+                      if (newSearchTerm.trim()) {
+                        setTimeRange('all');
+                        setExchangeFilter('all');
+                        setCurrentPage(1);
+                      }
+                    }}
+                  />
+                </div>
+                <div className="flex gap-1 w-full sm:w-auto">
+                  <Select value={exchangeFilter} onValueChange={handleExchangeChange}>
+                    <SelectTrigger className="w-full sm:w-36">
+                      <SelectValue placeholder={t('filterByExchange')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{t('allExchanges')}</SelectItem>
+                      {[...new Set(trades.map(t => t.apiName))].map(apiName => (
+                        <SelectItem key={apiName} value={apiName}>
+                          {apiName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button variant="outline" size="icon">
+                    <Download className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <Card className="w-full max-w-full overflow-x-auto">
+                <CardHeader className="p-2 pb-0">
+                  <CardTitle className="text-sm">{t('allTrades')}</CardTitle>
+                  <CardDescription className="text-xs">{t('tradeHistory')}</CardDescription>
+                </CardHeader>
+                <CardContent className="p-2">
+                  <div className="">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          {isMobileView ? (
+                            <>
+                              <TableHead className="px-2 py-2 text-xs w-[60px]">{t('ticket')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs">{t('symbol')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs">{t('direction')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs text-right">{t('openPrice')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs text-right">{t('openTime')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs w-10"></TableHead>
+                            </>
+                          ) : (
+                            <>
+                              <TableHead className="w-[60px] px-2 py-2 text-xs">{t('ticket')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs">{t('symbol')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs">{t('direction')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs text-right">{t('openPrice')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs text-right">{t('openTime')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs text-right">{t('volume')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs text-right">{t('sl')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs text-right">{t('tp')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs text-right">{t('closePrice')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs text-right">{t('closeTime')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs text-right">{t('profitLoss')}</TableHead>
+                              <TableHead className="px-2 py-2 text-xs">{t('status')}</TableHead>
+                            </>
+                          )}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {paginatedTrades.length === 0 ? (
+                          <TableRow>
+                            <TableCell colSpan={isMobileView ? 6 : 12} className="text-center">
+                              {loading ? t('loading') : (filteredTrades.length > 0 ? t('noTradeOnPage') : t('tradeRecordNotFound'))}
+                            </TableCell>
+                          </TableRow>
+                        ) : (
+                          paginatedTrades.map((trade) => (
+                            isMobileView ? (
+                              <React.Fragment key={trade.ticket}>
+                                <TableRow onClick={() => toggleRowExpansion(trade.ticket)} className="cursor-pointer text-xs hover:bg-muted/50">
+                                  <TableCell className="font-medium px-2 py-1.5">{trade.ticket}</TableCell>
+                                  <TableCell className="px-2 py-1.5">{trade.symbol}</TableCell>
+                                  <TableCell className="px-2 py-1.5">
+                                    <Badge className={`${trade.side === "BUY" ? "bg-blue-100 text-blue-800 border-blue-300" : "bg-red-100 text-red-800 border-red-300"} px-1.5 py-0.5 text-[10px] rounded-full`}>
+                                      {trade.side === "BUY" ? "LONG" : "SHORT"}
+                                    </Badge>
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1.5 text-right">
+                                    {typeof trade.openPrice === 'number' ? trade.openPrice.toFixed(4) : '-'}
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1.5 text-right">{formatDate(trade.openTime)}</TableCell>
+                                  <TableCell className="px-2 py-1.5 text-center">
+                                    {expandedRows[trade.ticket] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                  </TableCell>
+                                </TableRow>
+                                {expandedRows[trade.ticket] && (
+                                  <TableRow className="text-xs bg-muted/20">
+                                    <TableCell colSpan={6} className="px-3 py-2">
+                                      <div className="space-y-1 text-[11px]">
+                                        <div><span className="font-medium">{t('volume')}:</span> {trade.volume?.toFixed(2) || '-'}</div>
+                                        <div><span className="font-medium">{t('sl')}:</span> {typeof trade.sl === 'number' ? trade.sl.toFixed(4) : '-'}</div>
+                                        <div><span className="font-medium">{t('tp')}:</span> {typeof trade.tp === 'number' ? trade.tp.toFixed(4) : '-'}</div>
+                                        <div><span className="font-medium">{t('closePrice')}:</span> {typeof trade.closePrice === 'number' ? trade.closePrice.toFixed(4) : '-'}</div>
+                                        <div><span className="font-medium">{t('closeTime')}:</span> {formatDate(trade.closeTime)}</div>
+                                        <div>
+                                          <span className="font-medium">{t('profitLoss')}:</span> 
+                                          {(() => {
+                                            if (trade.statusCode !== 2) return ' -';
+                                            let calculatedProfit: number | undefined = undefined;
+                                            if (typeof trade.openPrice === 'number' && typeof trade.closePrice === 'number' && typeof trade.volume === 'number') {
+                                              calculatedProfit = trade.side === "BUY"
+                                                ? (trade.closePrice - trade.openPrice) * trade.volume
+                                                : (trade.openPrice - trade.closePrice) * trade.volume;
+                                            }
+                                            const profitColor = calculatedProfit !== undefined && calculatedProfit > 0 ? "text-green-600" : calculatedProfit !== undefined && calculatedProfit < 0 ? "text-red-600" : "";
+                                            return <span className={`font-medium ${profitColor}`}> {calculatedProfit !== undefined ? calculatedProfit.toFixed(2) : '-'}</span>;
+                                          })()}
+                                        </div>
+                                        <div>
+                                          <span className="font-medium">{t('status')}:</span>
+                                          <Badge className={
+                                            `ml-1 ${trade.statusCode === 2 ? "bg-green-100 text-green-800 border-green-300" : 
+                                            trade.statusCode === 3 ? "bg-red-100 text-red-800 border-red-300" : 
+                                            "bg-yellow-100 text-yellow-800 border-yellow-300"} px-1.5 py-0.5 text-[10px] rounded-full`
+                                          }>
+                                            {t(trade.status.toLowerCase())}
+                                          </Badge>
+                                        </div>
+                                        {trade.statusCode === 3 && trade.event && (
+                                          <div className="text-red-700 italic"><span className="font-medium">{t('error')}:</span> {trade.event}</div>
+                                        )}
+                                      </div>
+                                    </TableCell>
+                                  </TableRow>
+                                )}
+                              </React.Fragment>
+                            ) : (
+                              <React.Fragment key={trade.ticket}>
+                                <TableRow className="text-xs">
+                                  <TableCell className="font-medium px-2 py-1.5">{trade.ticket}</TableCell>
+                                  <TableCell className="px-2 py-1.5">{trade.symbol}</TableCell>
+                                  <TableCell className="px-2 py-1.5">
+                                    <Badge className={`${trade.side === "BUY" ? "bg-blue-100 text-blue-800 border-blue-300" : "bg-red-100 text-red-800 border-red-300"} px-1.5 py-0.5 text-[10px] rounded-full`}>
+                                      {trade.side === "BUY" ? "LONG" : "SHORT"}
+                                    </Badge>
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1.5 text-right">
+                                    {typeof trade.openPrice === 'number' ? trade.openPrice.toFixed(4) : '-'}
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1.5 text-right">{formatDate(trade.openTime)}</TableCell>
+                                  <TableCell className="px-2 py-1.5 text-right">
+                                    {trade.volume?.toFixed(2) || '-'}
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1.5 text-right">
+                                    {typeof trade.sl === 'number' ? trade.sl.toFixed(4) : '-'}
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1.5 text-right">
+                                    {typeof trade.tp === 'number' ? trade.tp.toFixed(4) : '-'}
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1.5 text-right">
+                                    {typeof trade.closePrice === 'number' ? trade.closePrice.toFixed(4) : '-'}
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1.5 text-right">{formatDate(trade.closeTime)}</TableCell>
+                                  <TableCell className="px-2 py-1.5 text-right">
+                                    {(() => {
+                                      if (trade.statusCode !== 2) {
+                                        return '-';
+                                      }
+                                      let calculatedProfit: number | undefined = undefined;
+                                      if (typeof trade.openPrice === 'number' && typeof trade.closePrice === 'number' && typeof trade.volume === 'number') {
+                                        calculatedProfit = trade.side === "BUY"
+                                          ? (trade.closePrice - trade.openPrice) * trade.volume
+                                          : (trade.openPrice - trade.closePrice) * trade.volume;
+                                      }
+                                      const profitColor = calculatedProfit !== undefined && calculatedProfit > 0 ? "text-green-600" : "text-red-600";
+                                      return (
+                                        <span className={`font-medium ${profitColor}`}>
+                                          {calculatedProfit !== undefined ? calculatedProfit.toFixed(2) : '-'}
+                                        </span>
+                                      );
+                                    })()}
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1.5">
+                                    <Badge className={
+                                      `px-1.5 py-0.5 text-[10px] rounded-full ${
+                                        trade.statusCode === 2 ? "bg-green-100 text-green-800 border-green-300" : 
+                                        trade.statusCode === 3 ? "bg-red-100 text-red-800 border-red-300" : 
+                                        "bg-yellow-100 text-yellow-800 border-yellow-300"
+                                      }`
+                                    }>
+                                      {t(trade.status.toLowerCase())}
+                                    </Badge>
+                                  </TableCell>
+                                </TableRow>
+                                {trade.statusCode === 3 && trade.event && (
+                                  <TableRow className="bg-red-50 hover:bg-red-100">
+                                    <TableCell colSpan={12} className="py-1 px-2 text-[11px] text-red-700 italic">
+                                      {t('error')}: {trade.event}
+                                    </TableCell>
+                                  </TableRow>
+                                )}
+                              </React.Fragment>
+                            )
+                          ))
+                        )}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </CardContent>
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-end space-x-2 p-2 border-t">
+                    <span className="text-sm text-muted-foreground">
+                      {t('page')} {currentPage} / {totalPages}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={goToPreviousPage}
+                      disabled={currentPage === 1}
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                      <span className="sr-only">{t('previousPage')}</span>
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={goToNextPage}
+                      disabled={currentPage === totalPages}
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                      <span className="sr-only">{t('nextPage')}</span>
+                    </Button>
+                  </div>
+                )}
+              </Card>
+            </>
+          )}
+        </div>
+      </div>
+
+      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('editTrade')}</DialogTitle>
+            <DialogDescription>
+              {t('updateTradeDetails')}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label htmlFor="edit-symbol">{t('symbol')}</Label>
+              <Input
+                id="edit-symbol"
+                name="symbol"
+                value={formData.symbol}
+                onChange={handleInputChange}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-type">{t('type')}</Label>
+              <Select
+                value={formData.side}
+                onValueChange={handleSelectChange}
+              >
+                <SelectTrigger id="edit-type">
+                  <SelectValue placeholder={t('selectTradeType')} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="BUY">{t('long')}</SelectItem>
+                  <SelectItem value="SELL">{t('short')}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-entryPrice">{t('entryPrice')}</Label>
+              <Input
+                id="edit-entryPrice"
+                name="openPrice"
+                type="number"
+                value={formData.openPrice}
+                onChange={handleInputChange}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-exitPrice">{t('exitPrice')}</Label>
+              <Input
+                id="edit-exitPrice"
+                name="closePrice"
+                type="number"
+                value={formData.closePrice}
+                onChange={handleInputChange}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-profit">{t('profit')}</Label>
+              <Input
+                id="edit-profit"
+                name="profit"
+                type="number"
+                value={formData.profit}
+                onChange={handleInputChange}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-closeDate">{t('closeDate')}</Label>
+              <Input
+                id="edit-closeDate"
+                name="closeTime"
+                type="date"
+                value={formData.closeTime}
+                onChange={handleInputChange}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
+              {t('cancel')}
+            </Button>
+            <Button onClick={handleEditTrade}>{t('saveChanges')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('deleteTrade')}</DialogTitle>
+            <DialogDescription>
+              {t('deleteTradeConfirm')}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center p-4 border rounded-md bg-secondary/30 gap-3">
+            <AlertTriangle className="text-signal-warning" size={20} />
+            <div className="text-sm">
+              <p className="font-medium">{selectedTrade?.symbol}</p>
+              <p className="text-muted-foreground">{selectedTrade?.side === "BUY" ? t('long') : t('short')}</p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsDeleteDialogOpen(false)}>
+              {t('cancel')}
+            </Button>
+            <Button variant="destructive" onClick={handleDeleteTrade}>
+              {t('delete')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isAddSignalDialogOpen} onOpenChange={setIsAddSignalDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('addNewSignal')}</DialogTitle>
+            <DialogDescription>
+              {t('fillSignalDetails')}
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleSignalFormSubmit}>
+            <div className="grid gap-4 py-4">
+              <div className="grid gap-2">
+                <Label htmlFor="symbol">{t('symbol')}</Label>
+                <Input
+                  id="symbol"
+                  name="symbol"
+                  value={signalFormData.symbol}
+                  onChange={handleSignalInputChange}
+                  placeholder="BTCUSDT"
+                  required
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="trend">{t('trend')}</Label>
+                <Select
+                  value={signalFormData.trend}
+                  onValueChange={(value) => handleSignalInputChange({ target: { name: 'trend', value } } as any)}
+                >
+                  <SelectTrigger id="trend">
+                    <SelectValue placeholder={t('selectTrend')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="BUY">{t('long')}</SelectItem>
+                    <SelectItem value="SELL">{t('short')}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="slPercentage">{t('stopLossPercentage')}</Label>
+                <Input
+                  id="slPercentage"
+                  name="slPercentage"
+                  type="number"
+                  step="0.01"
+                  value={signalFormData.slPercentage}
+                  onChange={handleSignalInputChange}
+                  placeholder="1.5"
+                  required
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="entryRangePercentage">{t('entryRangePercentage')}</Label>
+                <Input
+                  id="entryRangePercentage"
+                  name="entryRangePercentage"
+                  type="number"
+                  step="0.01"
+                  value={signalFormData.entryRangePercentage}
+                  onChange={handleSignalInputChange}
+                  placeholder="1.5"
+                  required
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="tpCount">{t('tpCount')}</Label>
+                <Input
+                  id="tpCount"
+                  name="tpCount"
+                  type="number"
+                  value={signalFormData.tpCount}
+                  onChange={handleSignalInputChange}
+                  placeholder="1"
+                  required
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="tpRangePercentage">{t('tpRangePercentage')}</Label>
+                <Input
+                  id="tpRangePercentage"
+                  name="tpRangePercentage"
+                  type="number"
+                  step="0.01"
+                  value={signalFormData.tpRangePercentage}
+                  onChange={handleSignalInputChange}
+                  placeholder="1.5"
+                  required
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setIsAddSignalDialogOpen(false)}>
+                {t('cancel')}
+              </Button>
+              <Button type="submit">{t('addSignal')}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+};
+
+export default TradeHistory;

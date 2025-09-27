@@ -1,0 +1,1002 @@
+import pool from './db.js';
+import { rbinance } from './exchanges/binance_rest.js';
+import { rbingx } from './exchanges/bingx_rest.js';
+import { rbybit } from './exchanges/bybit_rest.js';
+import { create_order } from './run_user_create_order.js';
+import { close_order } from './run_user_close_order.js';
+import axios from './proxied_axios.js';
+import { print_log } from './print_log.js';
+import { notifyTp, notifySl, notifyTrailStop, notifyTrailStopClosed, notifyBreakEven, notifyOrderOpen, notifyOrderFailed, notifyOpenPositionExists } from './run_user_notification.js';
+import { bildirim_ekle, formatPriceTickSize } from './utils.js';
+
+
+async function run_user(sid, channel) {
+    let s_id = undefined, user_id = undefined, us_id = undefined, ch_id = undefined;
+    let sembolBulunamadiLogSet = new Set();
+
+    try {
+        let [init_us] = await pool.query("SELECT * FROM `user_signals` WHERE id=?", [sid]);
+        const us = init_us[0];
+        let [init_sg] = await pool.query("SELECT * FROM `signals` WHERE id=?", [us?.signal_id]);
+        const sg = init_sg[0];
+        let [init_api] = await pool.query("SELECT * FROM `api_keys` WHERE id=?", [us?.api_id]);
+        const api = init_api[0];
+        if (!api) {
+            print_log({ id: sid, uid: user_id, usid: us_id, chid: ch_id, msg: `run_user durdu: api_keys tablosunda id=${us?.api_id} ile eşleşen kayıt yok.`, pool });
+            return;
+        }
+        let user_id = us?.user_id || api?.user_id;
+        let us_id = us?.id;
+        let ch_id = sg?.channel_id;
+        let s_id = us?.signal_id;
+        print_log({ id: sid, uid: user_id, usid: us_id, chid: ch_id, msg: `run_user başlatıldı: ${JSON.stringify({ sid, status: us?.status, ticket: us?.ticket, open: us?.open })}`, pool });
+        let cli_ok = 0;
+        let admin_ok = 0;
+        let is_test = 0;
+
+        if (process.argv.length > 2) { // Running from CLI
+            cli_ok = 1;
+            sid = process.argv[2];
+            channel = process.argv[3];
+        } else {
+            if (channel === '2023') {
+                admin_ok = 1;
+            }
+        }
+
+        const sl_tp_wait_seconds = 15;
+        const signal_cancel_seconds = 60 * 30;
+        let bir_kere_ac = 0;
+        const pid = process.pid;
+        const bildirim_gonder = 1;
+
+        if (!us) {
+            print_log({ id: sid, uid: undefined, usid: undefined, chid: undefined, msg: `User signal with id ${sid} not found.`, pool });
+            return;
+        }
+
+        if (admin_ok == 1 && is_test == 0) {
+            print_log({ id: sid, uid: user_id, usid: us_id, chid: ch_id, msg: "sinyal sifirlandi\n", pool });
+            await pool.query("update user_signals set ticket='',open='',opentime='',closed_volume='',close='',closetime='',profit='',event='',status='',sticket='',tticket='' where id =?", [sid]);
+        }
+
+        if (admin_ok == 1 && is_test == 1) {
+            print_log({ id: sid, uid: user_id, usid: us_id, chid: ch_id, msg: "sinyal sifirlandi\n", pool });
+            await pool.query("update user_signals set ticket='',open='',opentime='',closed_volume='',close='',closetime='',profit='',event='',status='',sticket='',tticket='' where id =?", [sid]);
+        }
+        if (admin_ok == 1 && is_test == 2) {
+            print_log({ id: sid, uid: user_id, usid: us_id, chid: ch_id, msg: "SL / TP sifirlandi\n", pool });
+            await pool.query("update user_signals set sticket='',tticket='',status=1,closed_volume='',close=0,event='',closetime='' where id =?", [sid]);
+        }
+
+        const symbol = us["symbol"];
+        const api_key = api['api_key'];
+        const api_secret = api['api_secret'];
+        
+        let api_exchange;
+        switch (api.api_type) {
+            case 1:
+                api_exchange = 'binance';
+                break;
+            case 2:
+                api_exchange = 'bybit';
+                break;
+            case 3:
+                api_exchange = 'bingx';
+                break;
+            default:
+                const errorMsg = `Desteklenmeyen borsa tipi: ${api.api_type}`;
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: errorMsg, pool });
+                await pool.query("UPDATE user_signals SET status = 3, event = ? WHERE id = ?", [errorMsg, us.id]);
+                // return kaldırıldı, döngü devam edecek
+        }
+
+        let borsa;
+        if (api_exchange == "binance") {
+            borsa = new rbinance(api_key, api_secret);
+        } else if (api_exchange == "bingx") {
+            borsa = new rbingx(api_key, api_secret);
+        } else {
+            borsa = new rbybit(api_key, api_secret);
+        }
+        print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: 'run_user: borsa nesnesi oluşturuldu', pool });
+
+        // Telegram Kanal Üyelik Kontrolü
+        if (api.bot_room) { 
+            try {
+                const botToken = process.env.BOT_TOKEN;
+                if (!botToken) {
+                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: "BOT_TOKEN environment variable ayarlanmamış. Telegram üyelik kontrolü atlanıyor.", pool });
+                } else {
+                    // Veritabanındaki ID'nin başında -100 olup olmadığını kontrol et, yoksa ekle
+                    const channelId = api.bot_room.toString().startsWith('-100') ? api.bot_room : `-100${api.bot_room}`;
+                    const { data: json } = await axios.get(`https://api.telegram.org/bot${botToken}/getChatMember?chat_id=${channelId}&user_id=${user_id}`);
+                    
+                    if (!json.ok || !["member", "creator", "administrator"].includes(json.result.status)) {
+                        const eventMsg = `Kullanıcı, işlem için gerekli olan (${channelId}) Telegram kanalına üye değil. İşlem açılamadı.`;
+                        print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: eventMsg, pool });
+                        await pool.query("UPDATE user_signals SET status=3, event=? WHERE id=?", [eventMsg, us.id]);
+                        await bildirim_ekle(user_id, eventMsg);
+                        return; 
+                    }
+                }
+            } catch (e) {
+                const errorMsg = `Telegram üyelik kontrolü sırasında bir hata oluştu: ${e.response?.data?.description || e.message}\nStack: ${e.stack || ''}\nCode: ${e.code || ''}\nResponse: ${JSON.stringify(e.response?.data || {})}`;
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: api.bot_room, msg: errorMsg, pool });
+                await pool.query("UPDATE user_signals SET status=3, event=? WHERE id=?", [errorMsg, us.id]);
+                await bildirim_ekle(user_id, errorMsg);
+                return;
+            }
+        }
+
+        const exchanges = await borsa.get_exchange();
+
+        let leverages = undefined;
+     
+        const bysym = {};
+        const max_lots = {};
+        max_lots[symbol] = 0;
+
+        if (api_exchange == "binance") {
+            for (const s2 of exchanges['symbols']) {
+                for (const f2 of s2['filters']) {
+                    if (f2['filterType'] == "MARKET_LOT_SIZE") {
+                        max_lots[s2['symbol']] = f2['maxQty'];
+                    }
+                }
+                if (s2['symbol'] === symbol) {
+                    bysym['digits'] = (s2['priceFilter'] && s2['priceFilter']['minPrice']) ? (s2['priceFilter']['minPrice'].split('.')[1] || '').length : undefined;
+                    bysym['vdigits'] = (s2['lotSizeFilter'] && s2['lotSizeFilter']['minTradingQty']) ? (s2['lotSizeFilter']['minTradingQty'].split('.')[1] || '').length : undefined;
+                    if (bysym['digits'] === undefined || bysym['vdigits'] === undefined) {
+                        let [rateRows] = await pool.query('SELECT digits, vdigits FROM rates WHERE symbol = ? ORDER BY id DESC LIMIT 1', [symbol]);
+                        if (rateRows.length > 0) {
+                            if (bysym['digits'] === undefined) bysym['digits'] = rateRows[0].digits;
+                            if (bysym['vdigits'] === undefined) bysym['vdigits'] = rateRows[0].vdigits;
+                        }
+                    }
+                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `symbol details ${symbol}: ${bysym['digits']} vdigits: ${bysym['vdigits']}`, pool });
+                }
+            }
+        } else if (api_exchange == "bingx") {
+            for (const b1 of exchanges.data) {
+                const exc_symbol = b1.symbol.replace("-", "");
+                if (symbol.trim() == exc_symbol.trim()) {
+                    bysym['vdigits'] = b1.quantityPrecision;
+                    bysym['digits'] = b1.pricePrecision;
+                    if (bysym['digits'] === undefined || bysym['vdigits'] === undefined) {
+                        let [rateRows] = await pool.query('SELECT digits, vdigits FROM rates WHERE symbol = ? ORDER BY id DESC LIMIT 1', [symbol]);
+                        if (rateRows.length > 0) {
+                            if (bysym['digits'] === undefined) bysym['digits'] = rateRows[0].digits;
+                            if (bysym['vdigits'] === undefined) bysym['vdigits'] = rateRows[0].vdigits;
+                        }
+                    }
+                    max_lots[symbol] = 10000000;
+                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `symbol details ${symbol}: ${bysym['digits']} vdigits: ${bysym['vdigits']}`, pool });
+                }
+            }
+        } else { // bybit
+            for (const s2 of exchanges) {
+                if (symbol.trim() == s2['symbol'].trim()) {
+                    let min_lot_str = s2['lotSizeFilter']['minTradingQty'] || s2['lotSizeFilter']['minOrderQty'] || "0.0";
+                    bysym['vdigits'] = (min_lot_str.split('.')[1] || '').length;
+                    let min_price_str = s2['priceFilter']['minPrice'] || "0.0";
+                    bysym['digits'] = (min_price_str.split('.')[1] || '').length;
+                    if (bysym['digits'] === undefined || bysym['vdigits'] === undefined) {
+                        let [rateRows] = await pool.query('SELECT digits, vdigits FROM rates WHERE symbol = ? ORDER BY id DESC LIMIT 1', [symbol]);
+                        if (rateRows.length > 0) {
+                            if (bysym['digits'] === undefined) bysym['digits'] = rateRows[0].digits;
+                            if (bysym['vdigits'] === undefined) bysym['vdigits'] = rateRows[0].vdigits;
+                        }
+                    }
+                    max_lots[symbol] = s2['lotSizeFilter']['maxOrderQty'];
+                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `symbol details ${symbol}: ${bysym['digits']} vdigits: ${bysym['vdigits']}`, pool });
+                }
+            }
+        }
+
+        let loop_signal = true;
+        const signalTime = new Date(sg['tarih']).getTime() / 1000;
+        if (sg.tarih && cli_ok == 1 && signalTime + signal_cancel_seconds < Date.now() / 1000 && sg.open_price > 0 && us.open == 0) {
+            await pool.query("update `user_signals` set `event`='sinyalin süresi dolduğu için pas gecildi.',status=2,ticket='-1', `close`=?,`closetime`=NOW() where `id` =?", [sg.entry1, us.id]);
+            const log_str = `sinyalin süresi dolduğu için pas gecildi.\n`;
+            print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: log_str, pool });
+            return;
+        }
+
+        const is_all_tickets_exist = us.ticket;
+
+        if (!is_all_tickets_exist) {
+
+
+            if (api_exchange == "binance" || api_exchange == "bybit") {
+                leverages = await borsa.get_leverage();
+            } else if (api_exchange == "bingx") {
+                leverages = await borsa.get_leverage(symbol);
+            }
+    
+            // Kaldıraç doğrudan api_keys tablosundan alınacak
+            let user_leverage = api['leverage'];
+            let prev_not = 0;
+            if (api_exchange == "binance") {
+                if (!Array.isArray(leverages)) {
+                    print_log({id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: 'Binance kaldıraç verisi alınamadı veya iterable değil: ' + JSON.stringify(leverages), pool});
+                    // return; // Hatalı veri varsa fonksiyondan çıkma, devam et
+                } else {
+                    for (const b1 of leverages) {
+                        if (b1['symbol'] == symbol) {
+                            const sym_leverage = b1['brackets'];
+                            for (const b2 of sym_leverage) {
+                                if (b2['notionalCap'] > api['lotsize'] && prev_not <= api['lotsize'] && user_leverage > b2['initialLeverage']) {
+                                    user_leverage = b2['initialLeverage'];
+                                }
+                                prev_not = b2['notionalCap'];
+                            }
+                        }
+                    }
+                }
+            } else if (api_exchange == "bingx") {
+                let sym_leverage = undefined;
+                if (leverages && Array.isArray(leverages.data)) {
+                    sym_leverage = leverages.data.find(item => {
+                        const exc_symbol = (item.symbol || '').replace(/[-_]/g, '').toUpperCase();
+                        return exc_symbol === symbol.replace(/[-_]/g, '').toUpperCase();
+                    });
+                } else if (leverages && leverages.data && (typeof leverages.data.maxLongLeverage !== 'undefined' || typeof leverages.data.maxShortLeverage !== 'undefined')) {
+                    sym_leverage = leverages.data;
+                } else if (leverages && (typeof leverages.data.maxLongLeverage !== 'undefined' || typeof leverages.data.maxShortLeverage !== 'undefined')) {
+                    sym_leverage = leverages.data;
+                }
+                if (!sym_leverage || typeof sym_leverage.maxLongLeverage === 'undefined' || typeof sym_leverage.maxShortLeverage === 'undefined') {
+                    const errorMsg = `BingX kaldıraç verisi bulunamadı veya eksik: ${JSON.stringify(sym_leverage)} | leverages: ${JSON.stringify(leverages)}`;
+                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: errorMsg, pool });
+                    await pool.query("UPDATE user_signals SET status = 3, event = ? WHERE id = ?", [errorMsg, us.id]);
+                    // return; // Hatalı veri varsa fonksiyondan çıkma, devam et
+                }
+                if (sg['direction'] == "LONG") {
+                    if (user_leverage > sym_leverage.maxLongLeverage) {
+                        user_leverage = sym_leverage.maxLongLeverage;
+                    }
+                } else if (sg['direction'] == "SHORT") {
+                    if (user_leverage > sym_leverage.maxShortLeverage) {
+                        user_leverage = sym_leverage.maxShortLeverage;
+                    }
+                }
+            } else { // bybit
+                for (const b1 of leverages) {
+                    if (b1['symbol'] == symbol) {
+                        const sym_leverage = b1["leverageFilter"]["maxLeverage"];
+                        if (user_leverage > sym_leverage) {
+                            user_leverage = sym_leverage;
+                        }
+                    }
+                }
+            }
+          
+    
+          
+            try {
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: 'run_user: margin ayarı başlıyor', pool });
+                let margin_sonuc;
+                let marginType = api.margin_type;
+                if (!marginType || (marginType !== "ISOLATED" && marginType !== "CROSSED")) {
+                    marginType = "CROSSED";
+                }
+                if (api_exchange == "binance") {
+                    margin_sonuc = await borsa.api_set_margin_type(symbol, marginType);
+                } else if (api_exchange == "bingx") {
+                    margin_sonuc = await borsa.api_set_margin_type(symbol, marginType);
+                } else {
+                    margin_sonuc = await borsa.api_set_margin_type(symbol, marginType, 10);
+                }
+                const log_str = `margin_mode: ${JSON.stringify(margin_sonuc)}`;
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: log_str, pool });
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: 'run_user: margin ayarı tamamlandı', pool });
+            } catch (apikeyr) {
+                const log_str = `margin_mode error:\n ${JSON.stringify(apikeyr)}`;
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: log_str, pool });
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `run_user: margin ayarı hata: ${JSON.stringify(apikeyr)}`, pool });
+
+            }
+
+            try {
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: 'run_user: leverage ayarı başlıyor', pool });
+                let level_status;
+                if (api_exchange == "binance") {
+                    level_status = await borsa.api_set_leverage(symbol, user_leverage);
+                } else if (api_exchange == "bingx") {
+                    level_status = await borsa.api_set_leverage(symbol, user_leverage);
+                } else {
+                    level_status = await borsa.api_set_leverage(symbol, user_leverage);
+                }
+                const log_str = `leverage status: ${JSON.stringify(level_status)}`;
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: log_str, pool });
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: 'run_user: leverage ayarı tamamlandı', pool });
+            } catch (leverage_err) {
+                const log_str = `leverage error: ${JSON.stringify(leverage_err)}`;
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: log_str, pool });
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `run_user: leverage ayarı hata: ${JSON.stringify(leverage_err)}`, pool });
+                // Hata durumunda döngü devam edecek, return veya çıkış yok
+            }
+        }
+
+        
+        let fba = 0;
+
+        async function user_signal_open_order(borsa, api, us, sg, bysym) {
+            // Pozisyon limiti kontrolü
+            if (api.max_orders > 0) {
+                try {
+                    const pozlar = await borsa.position_risk();
+                    let pozisyonSayisi = 0;
+                    for (const key in pozlar) {
+                        const miktar = parseFloat(pozlar[key]);
+                        if (!isNaN(miktar) && Math.abs(miktar) > 0) {
+                            pozisyonSayisi++;
+                        }
+                    }
+                    if (pozisyonSayisi >= api.max_orders) {
+                        await pool.query('UPDATE user_signals SET status=3, event=? WHERE id=?', [
+                            `Max open position limit reached: ${pozisyonSayisi} >= ${api.max_orders}`,
+                            us.id
+                        ]);
+                        await bildirim_ekle(api.user_id, `You have reached your maximum open position limit (${api.max_orders}). No new position will be opened.`);
+                        print_log({ id: s_id, uid: api.user_id, usid: us.id, chid: ch_id, msg: `Max open position limit reached: ${pozisyonSayisi} >= ${api.max_orders}` });
+                        return null;
+                    }
+                } catch (e) {
+                    print_log({ id: s_id, uid: api.user_id, usid: us.id, chid: ch_id, msg: `Position count check failed: ${e}` });
+                }
+            }
+            if (us.ticket && (!us.open || us.open == 0)) {
+                try {
+                    const pozlar = await borsa.position_risk();
+                    if (pozlar[us.symbol] && Math.abs(parseFloat(pozlar[us.symbol])) > 0) {
+                        // Pozisyon açık, open fiyatını güncelle
+                        let entryPrice = 0;
+                        if (api_exchange === 'binance') {
+                            const pozDetay = await borsa.call('/fapi/v2/positionRisk', 1, { symbol: us.symbol }, 'GET');
+                            if (Array.isArray(pozDetay)) {
+                                const detay = pozDetay.find(p => p.symbol === us.symbol);
+                                if (detay && detay.entryPrice) {
+                                    entryPrice = parseFloat(detay.entryPrice);
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `[BINANCE] pozDetay entryPrice: ${entryPrice}`, pool });
+                                }
+                            }
+                        } else if (api_exchange === 'bybit') {
+                            const pozDetay = await borsa.call('/v5/position/list', 1, { category: 'linear', symbol: us.symbol }, 'GET');
+                            if (pozDetay && pozDetay.result && Array.isArray(pozDetay.result.list)) {
+                                const detay = pozDetay.result.list.find(p => p.symbol === us.symbol);
+                                if (detay && detay.avgEntryPrice) {
+                                    entryPrice = parseFloat(detay.avgEntryPrice);
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `[BYBIT] pozDetay avgEntryPrice: ${entryPrice}`, pool });
+                                }
+                            }
+                        } else if (api_exchange === 'bingx') {
+                            const pozDetay = await borsa.call('/v1/user/positions', 1, { symbol: us.symbol }, 'GET');
+                            if (pozDetay && pozDetay.data && Array.isArray(pozDetay.data.positions)) {
+                                const detay = pozDetay.data.positions.find(p => p.symbol === us.symbol);
+                                if (detay && detay.entryPrice) {
+                                    entryPrice = parseFloat(detay.entryPrice);
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `[BINGX] pozDetay entryPrice: ${entryPrice}`, pool });
+                                }
+                            }
+                        }
+                        // Eğer entryPrice bulunamazsa, open fiyatı olarak pozisyonun mevcut fiyatını kullan
+                        if (!entryPrice && pozlar[us.symbol]) {
+                            entryPrice = Math.abs(parseFloat(pozlar[us.symbol]));
+                        }
+                        if (entryPrice > 0) {
+                            await pool.query('UPDATE user_signals SET open=? WHERE id=?', [entryPrice, us.id]);
+                            us.open = entryPrice;
+                        }
+                        return us;
+                    } else {
+                        // Pozisyon yok, ticket alanını boşalt
+                        await pool.query('UPDATE user_signals SET ticket=NULL WHERE id=?', [us.id]);
+                        us.ticket = null;
+                    }
+                } catch (e) {
+                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `Pozisyon kontrolünde hata: ${e}` });
+                }
+            }
+            if (!us.open) {
+                const log_msg = `İşlem açma sinyali geldi. ${api.api_type == 1 ? "binance" : "diğer"} | ${us.symbol} | ${sg.direction}`;
+                print_log({ id: sg.id, uid: api.user_id, usid: us.id, chid: api.bot_room, msg: log_msg, pool });
+                await create_order(borsa, api_exchange, api, user_id, us, sg, bysym);
+            }
+            return us;
+        }
+
+        async function user_signal_sl_kontrol(borsa, api, us, sg, bysym) {
+            if (us.open > 0 && us.close == 0 && (!us.sticket || us.sticket == '0' || us.sticket == 0)) {
+                let sprice = us.sl;
+                if (sprice > 0) {
+                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id , msg: 'Kullanıcı için stop loss kontrol fonksiyonu çağrıldı.', pool });
+                    try {
+                        const orders = await borsa.open_orders(us.symbol);
+                        if (Array.isArray(orders)) {
+                            for (const order of orders) {
+                                // Binance: type: STOP_MARKET, origType: STOP_MARKET, BingX: type: STOP_MARKET, Bybit: stopOrderType: StopLoss
+                                if ((order.type && order.type.toUpperCase().includes('STOP')) ||
+                                    (order.origType && order.origType.toUpperCase().includes('STOP')) ||
+                                    (order.stopOrderType && order.stopOrderType.toUpperCase().includes('STOPLOSS')) ||
+                                    (order.type && order.type.toUpperCase() === 'SL')) {
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `order_delete çağrıldı: symbol=${us.symbol}, ticket=${order.orderId || order.id || order.orderID}`, pool });
+                                    const deleteResult = await borsa.order_delete(us.symbol, order.orderId || order.id || order.orderID);
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `order_delete cevabı: ${JSON.stringify(deleteResult)}`, pool });
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `Açık SL emri silindi: ${order.orderId || order.id || order.orderID}` });
+                                }
+                            }
+                        }
+                    } catch (e) { print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `SL silme kontrolünde hata: ${e}` }); }
+                    // --- SL emri gönderme ---
+                    let sl_ticket = null;
+                    let lastError = '';
+                    const slSide = (us.trend === "LONG" ? "SELL" : "BUY");
+                    let adjustedSprice = sprice;
+
+                    for (let attempt = 1; attempt <= 5; attempt++) { // 5 denemeye kadar
+                        try {
+                            sl_ticket = await borsa.order_send(us.symbol, slSide, "SL", 0, formatPriceTickSize(adjustedSprice, bysym.tickSize), "GTE_GTC", true);
+                            print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `user_signal_sl_kontrol order_send cevabı (Deneme ${attempt}): ${JSON.stringify(sl_ticket)}`, pool });
+
+                            if (sl_ticket && sl_ticket.orderId) {
+                                await pool.query("UPDATE user_signals SET sticket=?, sl=? WHERE id=?", [sl_ticket.orderId, adjustedSprice, us.id]);
+                                us.sticket = sl_ticket.orderId;
+                                us.sl = adjustedSprice;
+                                return us; // Başarılı, fonksiyondan çık
+                            }
+                            
+                            // Hata "immediately trigger" ise fiyatı ayarla ve tekrar dene
+                            if (sl_ticket && sl_ticket.msg && sl_ticket.msg.includes('Order would immediately trigger')) {
+                                lastError = sl_ticket.msg;
+                                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `SL emri anında tetikleneceği için reddedildi. Fiyat ayarlanıyor... (Eski: ${adjustedSprice})`, pool });
+                                const tickSize = parseFloat(bysym.tickSize);
+                                if (us.trend === 'LONG') {
+                                    adjustedSprice -= tickSize; // LONG için fiyatı düşür
+                                } else {
+                                    adjustedSprice += tickSize; // SHORT için fiyatı artır
+                                }
+                                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `Yeni SL deneme fiyatı: ${adjustedSprice}`, pool });
+                                await new Promise(res => setTimeout(res, 500)); // Kısa bir bekleme
+                            } else {
+                                lastError = JSON.stringify(sl_ticket);
+                                break; // Farklı bir hata, döngüden çık
+                            }
+
+                        } catch (err) {
+                            lastError = err && err.message ? err.message : String(err);
+                            await new Promise(res => setTimeout(res, 1000));
+                        }
+                    }
+                    // 5 denemede de açılamadıysa
+                    await pool.query("UPDATE user_signals SET sticket=-1 WHERE id=?", [us.id]);
+                    const failMsg = notifyOrderFailed(us.symbol, us.trend, api.api_name || '', api_exchange, lastError);
+                    await bildirim_ekle(api.user_id, failMsg);
+                }
+            }
+            return us;
+        }
+
+        async function user_signal_tp_kontrol(borsa, api, us, sg, bysym) {
+            if (us.open > 0 && us.close == 0 && (!us.tticket || us.tticket == 0 || us.tticket == null)) {
+                let tprice = us.tp;
+                if (tprice > 0) {
+                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: 'Kullanıcı için take profit kontrol fonksiyonu çağrıldı.', pool });
+                    try {
+                        const orders = await borsa.open_orders(us.symbol);
+                        if (Array.isArray(orders)) {
+                            for (const order of orders) {
+                                // Binance: type: TAKE_PROFIT_MARKET, origType: TAKE_PROFIT_MARKET, BingX: type: TAKE_PROFIT_MARKET, Bybit: stopOrderType: TakeProfit
+                                if ((order.type && order.type.toUpperCase().includes('TAKE_PROFIT')) ||
+                                    (order.origType && order.origType.toUpperCase().includes('TAKE_PROFIT')) ||
+                                    (order.stopOrderType && order.stopOrderType.toUpperCase().includes('TAKEPROFIT')) ||
+                                    (order.type && order.type.toUpperCase() === 'TP')) {
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `order_delete çağrıldı: symbol=${us.symbol}, ticket=${order.orderId || order.id || order.orderID}`, pool });
+                                    const deleteResult = await borsa.order_delete(us.symbol, order.orderId || order.id || order.orderID);
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `order_delete cevabı: ${JSON.stringify(deleteResult)}`, pool });
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `Açık TP emri silindi: ${order.orderId || order.id || order.orderID}` });
+                                }
+                            }
+                        }
+                    } catch (e) { print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `TP silme kontrolünde hata: ${e}` }); }
+                    // --- TP emri gönderme ---
+                    let tp_ticket = null;
+                    let lastError = '';
+                    const tpSide = (us.trend === "LONG" ? "SELL" : "BUY");
+                    for (let attempt = 1; attempt <= 3; attempt++) {
+                        try {
+                            tp_ticket = await borsa.order_send(us.symbol, tpSide, "TP", 0, formatPriceTickSize(tprice, bysym.tickSize), "GTE_GTC", true);
+                                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `user_signal_tp_kontrol order_send cevabı: ${JSON.stringify(tp_ticket)}`, pool });
+                            
+                            if (tp_ticket && tp_ticket.orderId) {
+                                await pool.query("UPDATE user_signals SET tticket=?, tp=? WHERE id=?", [tp_ticket.orderId, tprice, us.id]);
+                                us.tticket = tp_ticket.orderId;
+                                us.tp = tprice;
+                                return us;
+                            }
+                            lastError = tp_ticket;
+                        } catch (err) {
+                            lastError = err && err.message ? err.message : String(err);
+                            await new Promise(res => setTimeout(res, 1000));
+                        }
+                    }
+                    // 3 denemede de açılamadıysa
+                    await pool.query("UPDATE user_signals SET tticket=-1 WHERE id=?", [us.id]);
+                    const failMsg = notifyOrderFailed(us.symbol, us.trend, api.api_name || '', api_exchange, lastError);
+                    await bildirim_ekle(api.user_id, failMsg);
+                }
+            }
+            return us;
+        }
+
+        async function user_signal_trailstop(borsa, api, us, sg, bysym) {
+            // signals ve api_keys tablosundan trail_stop ve tp_hit değerlerini çek
+            let [signalRow] = await pool.query('SELECT tp_hit, tp1, tp2, tp3, tp4, tp5, tp6, tp7, tp8, tp9, tp10 FROM signals WHERE id=?', [us.signal_id]);
+            let mainSignal = signalRow[0];
+            let [apiRow] = await pool.query('SELECT trail_stop, api_name FROM api_keys WHERE id=?', [us.api_id]);
+            let userApi = apiRow[0];
+            if (!mainSignal || !userApi || !userApi.trail_stop || us.open <= 0 || us.close > 0) return us;
+            const trailIdx = parseInt(userApi.trail_stop);
+            const tpHit = parseInt(mainSignal.tp_hit);
+            let newSl = null;
+            let tpLevel = null;
+            // İlk tetik: tp_hit - trail_stop == 0 ise SL açılış fiyatına çek
+            if ((tpHit - trailIdx) === 0) {
+                newSl = us.open;
+                tpLevel = 0;
+            } else if ((tpHit - trailIdx) > 0 && (tpHit - trailIdx) <= 10) {
+                // Sonraki tetikler: SL bir önceki TP fiyatına çek
+                tpLevel = tpHit - trailIdx;
+                newSl = mainSignal[`tp${tpLevel}`];
+            }
+            if (newSl && parseFloat(newSl) > 0 && us.sl != newSl) {
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `Trailstop çalıştı. Eski SL fiyatı: ${us.sl}, Yeni SL fiyatı: ${newSl}`, pool });
+                try {
+                    const orders = await borsa.open_orders(us.symbol);
+                    if (Array.isArray(orders)) {
+                        for (const order of orders) {
+                            // SL tipi emirleri bul
+                            if ((order.type && order.type.toUpperCase().includes('STOP')) || (order.origType && order.origType.toUpperCase().includes('STOP'))) {
+                                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `order_delete çağrıldı: symbol=${us.symbol}, ticket=${order.orderId || order.id}`, pool });
+                                const deleteResult = await borsa.order_delete(us.symbol, order.orderId || order.id);
+                                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `order_delete cevabı: ${JSON.stringify(deleteResult)}`, pool });
+                                await pool.query('UPDATE user_signals SET sticket=0 WHERE id=?', [us.id]);
+                            }
+                        }
+                    }
+                } catch (e) {}
+                // Yeni stop emrini ata
+                const slSide = (us.trend === 'LONG') ? 'SELL' : 'BUY';
+                let sl_ticket;
+                try {
+                    sl_ticket = await borsa.order_send(us.symbol, slSide, 'SL', api.api_type === 3 ? us.volume : 0, formatPriceTickSize(newSl, bysym.tickSize));
+                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `user_signal_trailstop order_send cevabı: ${JSON.stringify(sl_ticket)}`, pool });
+                } catch (e) { sl_ticket = null; }
+                if (sl_ticket && sl_ticket.orderId) {
+                    await pool.query('UPDATE user_signals SET sticket=?, sl=? WHERE id=?', [sl_ticket.orderId, newSl, us.id]);
+                } else {
+                    await pool.query('UPDATE user_signals SET sticket=NULL, sl=? WHERE id=?', [newSl, us.id]);
+                }
+                // Bildirim
+                const userSignalDetails = { ...us, sl: newSl, symbol: us.symbol };
+                const signalDetails = { ...mainSignal, symbol: us.symbol };
+                const apiKeyDetails = { api_name: userApi.api_name };
+                await bildirim_ekle(us.user_id, notifyTrailStop(userSignalDetails, signalDetails, tpLevel, newSl, apiKeyDetails, api.api_type === 1 ? 'binance' : api.api_type === 2 ? 'bybit' : 'bingx'));
+                
+            }
+
+            return us;
+        }
+
+        async function user_signal_maliyetine_cek(borsa, api, us, sg, bysym) {
+            // break_even_level: tp1, tp2, tp3 ...
+            if (!api.break_even_level || us.close > 0) return us;
+            let [signalRow] = await pool.query('SELECT tp_hit, entry1, entry2 FROM signals WHERE id=?', [us.signal_id]);
+            let mainSignal = signalRow[0];
+            if (!mainSignal) return us;
+            const breakEvenIdx = parseInt(api.break_even_level);
+            if (mainSignal.tp_hit == breakEvenIdx && us.sl < us.open) {
+                // SL'yi açılış fiyatına çek
+                // Borsadaki eski stop emrini canlı olarak bul ve sil
+                try {
+                    const orders = await borsa.open_orders(us.symbol);
+                    if (Array.isArray(orders)) {
+                        for (const order of orders) {
+                            if ((order.type && order.type.toUpperCase().includes('STOP')) || (order.origType && order.origType.toUpperCase().includes('STOP'))) {
+                                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `order_delete çağrıldı: symbol=${us.symbol}, ticket=${order.orderId || order.id}`, pool });
+                                const deleteResult = await borsa.order_delete(us.symbol, order.orderId || order.id);
+                                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `order_delete cevabı: ${JSON.stringify(deleteResult)}`, pool });
+                                await pool.query('UPDATE user_signals SET sticket=0 WHERE id=?', [us.id]);
+                            }
+                        }
+                    }
+                } catch (e) {}
+                // Yeni stop emrini açılış fiyatına koy
+                const slSide = (us.trend === 'LONG') ? 'SELL' : 'BUY';
+                let sl_ticket;
+                try {
+                    sl_ticket = await borsa.order_send(us.symbol, slSide, 'SL', api.api_type === 3 ? us.volume : 0, formatPriceTickSize(us.open, bysym.tickSize));
+                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `user_signal_maliyetine_cek order_send cevabı: ${JSON.stringify(sl_ticket)}`, pool });
+                } catch (e) { sl_ticket = null; }
+                if (sl_ticket && sl_ticket.orderId) {
+                    await pool.query('UPDATE user_signals SET sticket=?, sl=? WHERE id=?', [sl_ticket.orderId, us.open, us.id]);
+                } else {
+                    await pool.query('UPDATE user_signals SET sl=? WHERE id=?', [us.open, us.id]);
+                }
+                // Bildirim
+                let breakEvenTpValue = '-';
+                if (breakEvenIdx > 0) {
+                  breakEvenTpValue = us[`tp${breakEvenIdx}`] || mainSignal[`tp${breakEvenIdx}`] || us.open;
+                }
+                // Eğer breakEvenTpValue hala '-' ise ve us.open varsa, entry price'ı göster
+                if ((breakEvenTpValue === '-' || breakEvenTpValue === undefined || breakEvenTpValue === null) && us.open) {
+                  breakEvenTpValue = us.open;
+                }
+                const userSignalDetails = { ...us, sl: us.open, symbol: us.symbol, [`tp${breakEvenIdx}`]: breakEvenTpValue };
+                const signalDetails = { ...mainSignal, symbol: us.symbol, [`tp${breakEvenIdx}`]: breakEvenTpValue };
+                const apiKeyDetails = { api_name: api.api_name };
+                await bildirim_ekle(us.user_id, notifyBreakEven(userSignalDetails, signalDetails, breakEvenIdx, us.open, apiKeyDetails, api.api_type === 1 ? 'binance' : api.api_type === 2 ? 'bybit' : 'bingx'));
+                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: 'maliyetine çek fonksiyonu çalıştı.', pool });
+            }
+            return us;
+        }
+
+        async function signalLoop(borsa, s_id, user_id, us_id, ch_id) {
+            let aa = null, sg_loop = null;
+            let current_api = api;
+            let current_s_id = s_id;
+            let current_user_id = user_id;
+            let current_us_id = us_id;
+            let current_ch_id = ch_id;
+            try {
+                let [aa1] = await pool.query("SELECT * FROM user_signals where id = ?", [us_id]);
+                aa = aa1[0];
+
+                if (!aa) {
+                    print_log({ id: current_s_id, uid: current_user_id, usid: current_us_id, chid: current_ch_id, msg: `user_signals bulunamadı signal_id:${current_us_id}`, pool });
+                    return;
+                }
+
+
+                let [sg1] = await pool.query("SELECT * FROM `signals` WHERE id=?", [aa.signal_id]);
+                sg_loop = sg1[0];
+
+                let [api1] = await pool.query("SELECT * FROM `api_keys` WHERE id=?", [aa.api_id]);
+                current_api = api1[0];
+
+                let [sym1] = await pool.query("select * from rates where symbol=?", [aa.symbol]);
+                const sym = sym1[0];
+
+
+                
+                if (aa && aa.status == 5) {
+                    let [init_api] = await pool.query("SELECT * FROM `api_keys` WHERE id=?", [aa.api_id]);
+                    const api = init_api[0];
+                    let pozlar = {};
+                
+                    try {
+                        pozlar = await borsa.position_risk();
+                    } catch (e) {
+                        print_log({ id: aa.id, uid: aa.user_id, usid: aa.id, chid: aa.channel_id || ch_id, msg: `Pozisyon kontrolü sırasında hata: ${e}` });
+                    }
+                
+                    let lot = pozlar[aa.symbol] ? Math.abs(parseFloat(pozlar[aa.symbol])) : 0;
+                    if (lot > 0) {
+                        const closeSide = (aa.trend === 'LONG') ? 'SELL' : 'BUY';
+                        let closeResult = null;
+                        try {
+                            closeResult = await borsa.order_send(aa.symbol, closeSide, 'MARKET', lot, undefined, 1); // cls=1 for reduceOnly
+                        } catch (e) {
+                            print_log({ id: aa.id, uid: aa.user_id, usid: aa.id, chid: aa.channel_id || ch_id, msg: `Manuel kapatma sırasında hata: ${e}` });
+                        }
+                        let closePrice = null;
+                        if (closeResult && closeResult.avgPrice) closePrice = parseFloat(closeResult.avgPrice);
+                        if ((!closePrice || closePrice == 0) && closeResult && closeResult.price) closePrice = parseFloat(closeResult.price);
+                        // Eğer hala closePrice yoksa rates tablosundan çek
+                        if (!closePrice || closePrice == 0) {
+                            let [rateRows] = await pool.query("SELECT price FROM rates WHERE symbol = ? ORDER BY id DESC LIMIT 1", [aa.symbol]);
+                            if (rateRows.length > 0) closePrice = parseFloat(rateRows[0].price);
+                        }
+                        let open = parseFloat(aa.open);
+                        let profit = 0;
+                        if (aa.trend === 'LONG') {
+                            profit = (closePrice - open) * lot;
+                        } else {
+                            profit = (open - closePrice) * lot;
+                        }
+                        const profitPercent = (profit / (open * lot)) * 100;
+                        await pool.query('UPDATE user_signals SET close=?, closetime=NOW(), closed_volume=?, profit=?, status=2, event=CONCAT(event, "; Manuel kapatma") WHERE id=?', [closePrice, lot, profit, aa.id]);
+                        let msg = `⚠️ ***MANUAL POSITION CLOSE*** ⚠️\n\n` +
+                            `**Signal:** ${aa.symbol} ${aa.trend}\n` +
+                            `**API Name:** ${api.api_name || ''}\n` +
+                            `**Exchange:** ${api.api_type == 1 ? 'binance' : api.api_type == 2 ? 'bybit' : 'bingx'}\n\n` +
+                            `**Open Price:** ${open}\n` +
+                            `**Close Price:** ${closePrice}\n` +
+                            `**Volume:** ${lot}\n` +
+                            `**Profit:** ${profit.toFixed(2)} USDT (${profitPercent.toFixed(2)}%)\n\n` +
+                            `This position was manually closed by the system.`;
+                        await pool.query("INSERT INTO bildirimler (user_id, msg, gonderim) VALUES (?, ?, 0)", [aa.user_id, msg]);
+                        print_log({ id: aa.id, uid: aa.user_id, usid: aa.id, chid: aa.channel_id || ch_id, msg: `Manuel kapatma bildirimi gönderildi: ${msg}` });
+                        print_log({ id: aa.id, uid: aa.user_id, usid: aa.id, chid: aa.channel_id || ch_id, msg: `Manuel kapatma borsa cevabı: ${JSON.stringify(closeResult)}` });
+                    }
+                    print_log({ id: aa.id, uid: aa.user_id, usid: aa.id, chid: aa.channel_id || ch_id, msg: `status 5 olduğu için manuel kapatma tamamlandı ve fonksiyon sonlandırıldı.`, pool });
+                    return;
+                }
+
+                if (aa.status > 1) {
+                    print_log({ id: current_s_id, uid: current_user_id, usid: current_us_id, chid: current_ch_id, msg: `${(current_api && current_api.name) ? current_api.name : ''} ${(sg_loop && sg_loop.symbol) ? sg_loop.symbol : ''} ${(sg_loop && sg_loop.direction) ? sg_loop.direction : ''} -> status ${aa.status} olduğu için takibi sonlandırıldı signal_id:${current_us_id}`, pool });
+                    return;
+                }
+
+                if (!sg_loop) {
+                    print_log({ id: current_s_id, uid: current_user_id, usid: current_us_id, chid: current_ch_id, msg: "signals tablosunda kayıt bulunamadı, bekleniyor.", pool });
+                    return;
+                }
+
+                if (!sym) {
+                    if (!sembolBulunamadiLogSet.has(current_us_id)) {
+                        print_log({ id: current_s_id, uid: current_user_id, usid: current_us_id, chid: current_ch_id, msg: "rates tablosunda sembol bulunamadı, bekleniyor.", pool });
+                        sembolBulunamadiLogSet.add(current_us_id);
+                    }
+                    setTimeout(function() { signalLoop(borsa, current_s_id, current_user_id, current_us_id, current_ch_id); }, 1000);
+                    return;
+                }
+                
+                // bysym objesini rates tablosundan gelen güncel verilerle dolduralım
+                const bysym = {
+                    digits: sym.digits,
+                    vdigits: sym.vdigits,
+                    tickSize: sym.tickSize,
+                    stepSize: sym.stepSize,
+                    price: sym.price
+                };
+                
+                // SADECE İŞLEM AÇIK DEĞİLSE POZİSYON KONTROLÜ YAP
+                if (!aa.ticket && aa.open == 0) {
+                try {
+                    const pozlar = await borsa.position_risk();
+                    if (pozlar && pozlar[symbol] && Math.abs(parseFloat(pozlar[symbol])) > 0) {
+                        print_log({ id: sid, uid: user_id, usid: us_id, chid: ch_id, msg: `position_risk: Kullanıcının ${symbol} paritesinde zaten pozisyonu var. Yeni işlem açılmayacak.`, pool });
+                        const notifyMsg = notifyOpenPositionExists(symbol, api.api_name, api.api_type === 1 ? 'binance' : api.api_type === 2 ? 'bybit' : 'bingx');
+                        await bildirim_ekle(user_id, notifyMsg);
+                        await pool.query("UPDATE user_signals SET status=3, event=? WHERE id=?", ['Kullanıcının borsada zaten açık pozisyonu var.', us_id]);
+                        return; // Fonksiyondan çık
+                    }
+                } catch (e) {
+                    print_log({ id: sid, uid: user_id, usid: us_id, chid: ch_id, msg: `position_risk kontrolünde hata: ${e}` });
+                    }
+                }
+
+                // 1. İşlem açma
+                if (aa.open == 0) {
+                    aa = await user_signal_open_order(borsa, api, aa, sg_loop, bysym);
+                }
+                if (!aa) { print_log({ id: current_s_id, uid: current_user_id, usid: current_us_id, chid: current_ch_id, msg: 'signalLoop sonlandı: user_signal_open_order null döndü', pool }); return; }
+
+                // İşlem açıldıktan sonra SL/TP/Trail/Maliyet kontrolleri
+                if(aa.open > 0 && aa.close == 0) {
+                    
+                    // PIYASA FIYATI ILE ACIL SL KONTROLU (ANA SİNYALDEN BAĞIMSIZ)
+                    // Pozisyon açıldıktan sonraki ilk 5 saniye bu kontrolü atla
+                    const openTime = new Date(aa.opentime).getTime();
+                    const now = new Date().getTime();
+                    if (now - openTime > 5000) { // 5 saniye hoşgörü süresi
+                        if (aa.sl > 0) {
+                            const stopLossPrice = parseFloat(aa.sl);
+                            const currentPrice = parseFloat(bysym.price);
+                            let triggered = false;
+
+                            if (aa.trend === 'LONG' && currentPrice <= stopLossPrice) {
+                                triggered = true;
+                            } else if (aa.trend === 'SHORT' && currentPrice >= stopLossPrice) {
+                                triggered = true;
+                            }
+
+                            if (triggered) {
+                                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `ACIL SL TETIKLENDI: Piyasa fiyatı (${currentPrice}) SL seviyesini (${stopLossPrice}) kırdı. Pozisyon kapatılıyor.`, pool });
+
+                                try {
+                                    // Mevcut açık emirleri (özellikle borsadaki SL/TP) iptal et
+                                    const openOrders = await borsa.open_orders(symbol);
+                                    for (const order of openOrders) {
+                                        await borsa.order_delete(symbol, order.orderId);
+                                        print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `ACIL SL: Açık emir (${order.orderId}) iptal edildi.`, pool });
+                                    }
+                                } catch (e) {
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `ACIL SL: Mevcut SL/TP emirleri iptal edilirken hata: ${e.message}`, pool });
+                                }
+
+                                // Pozisyonu market emriyle kapat
+                                const closeSide = (aa.trend === 'LONG') ? 'SELL' : 'BUY';
+                                const volumeToClose = parseFloat(aa.volume); // HATA DUZELTME: aa.open yerine aa.volume kullan
+                                
+                                try {
+                                    const closeResult = await borsa.order_send(symbol, closeSide, 'MARKET', volumeToClose, undefined, 1); // reduceOnly=1
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `ACIL SL: Kapatma emri gönderildi. Borsa cevabı: ${JSON.stringify(closeResult)}`, pool });
+
+                                    const openPrice = parseFloat(aa.open_price);
+                                    const closePrice = currentPrice;
+                                    
+                                    let zarar = 0;
+                                    let profitPercent = 0;
+
+                                    if (openPrice > 0 && volumeToClose > 0) {
+                                        zarar = (aa.trend === 'LONG') ? (closePrice - openPrice) * volumeToClose : (openPrice - closePrice) * volumeToClose;
+                                        profitPercent = (zarar / (openPrice * volumeToClose)) * 100;
+                                    } else {
+                                        print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `ACIL SL: K/Z hesaplanamadı, openPrice (${aa.open_price}) veya volumeToClose (${aa.volume}) geçersiz.`, pool });
+                                    }
+
+                                    await pool.query('UPDATE user_signals SET sl_hit=1, status=2, close=?, closetime=NOW(), closed_volume=?, profit=?, event="Piyasa Fiyatı ile SL" WHERE id=?', [closePrice, volumeToClose, zarar, us_id]);
+                                    
+                                    const msg = notifySl({ ...aa }, { ...sg_loop, symbol: symbol }, zarar, profitPercent, volumeToClose, closePrice, { api_name: api.api_name }, api_exchange, bysym.stepSize, bysym.vdigits);
+                                    await bildirim_ekle(user_id, msg);
+
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: 'signalLoop sonlandı: Piyasa fiyatı ile SL oldu', pool });
+                                    return; // Takibi durdur
+                                } catch(e) {
+                                    print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `ACIL SL: Market kapatma emri sırasında KRITIK HATA: ${e.message}`, pool });
+                                    await pool.query('UPDATE user_signals SET status=3, event=CONCAT(event, "; ACIL SL Kapatma Hatası") WHERE id = ?', [us_id]);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. SL kontrolü
+                    aa = await user_signal_sl_kontrol(borsa, api, aa, sg_loop, bysym);
+
+                    // TP KONTROLÜ
+                    if (aa.take_profit && aa.open > 0 && !aa.tticket) {
+                        const tp_price = parseFloat(aa.take_profit.split(',')[aa.tp_counter]);
+                        const next_tp_price = aa.take_profit.split(',')[aa.tp_counter + 1] ? parseFloat(aa.take_profit.split(',')[aa.tp_counter + 1]) : null;
+
+                        if ((sg_loop.direction === 'LONG' && parseFloat(bysym.price) >= tp_price) || (sg_loop.direction === 'SHORT' && parseFloat(bysym.price) <= tp_price)) {
+                            
+                            const closeSide = sg_loop.direction === 'LONG' ? 'SELL' : 'BUY';
+                            const volume = parseFloat(aa.volume.split(',')[aa.tp_counter]);
+                            
+                            try {
+                                const tpOrder = await borsa.order_send(symbol, closeSide, "MARKET", volume, 0, 'GTC', true);
+                                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `user_signal_tp_kontrol order_send cevabı: ${JSON.stringify(tpOrder)}`, pool });
+
+                                if(tpOrder && tpOrder.orderId) {
+                                    const remainingVolume = parseFloat(aa.open) - volume;
+                                    const notifyMsg = notifyTp(symbol, sg_loop.direction, api.api_name, 'binance', aa.open_price, tp_price, volume, aa.tp_counter + 1);
+                                    await bildirim_ekle(user_id, notifyMsg, pool);
+                                    
+                                    // Son TP mi kontrolü
+                                    if (aa.tp_counter + 1 >= aa.take_profit.split(',').length) {
+                                        // Son TP, pozisyonu tamamen kapat
+                                        print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `signalLoop sonlandı: Son TP seviyesine ulaşıldı`, pool });
+                                        await pool.query('UPDATE user_signals SET status = 2, open = 0, sticket = NULL, tticket = NULL WHERE id = ?', [us_id]);
+                                        
+                                        // Kalan son SL emrini iptal et
+                                        if(aa.sticket) {
+                                            await borsa.order_delete(symbol, aa.sticket);
+                                            print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `Son TP sonrası kalan SL emri (${aa.sticket}) iptal edildi.`, pool });
+                                        }
+                            } else {
+                                        // Son TP değil, veriyi güncelle
+                                        await pool.query('UPDATE user_signals SET tp_counter = tp_counter + 1, open = ? WHERE id = ?', [remainingVolume, us_id]);
+                                    }
+                                }
+                            } catch (e) {
+                                print_log({ id: s_id, uid: user_id, usid: us_id, chid: ch_id, msg: `TP Kontrol hatası: ${e.message}`, pool });
+                            }
+                        }
+                    }
+
+                    // 3. TP kontrolü
+                    aa = await user_signal_tp_kontrol(borsa, api, aa, sg_loop, bysym);
+
+                    // 4. Trail Stop kontrolü
+                    aa = await user_signal_trailstop(borsa, api, aa, sg_loop, bysym);
+
+                    // 5. Maliyetine Çek kontrolü
+                    aa = await user_signal_maliyetine_cek(borsa, api, aa, sg_loop, bysym);
+
+                }
+
+               
+                let [apiRowCustom] = await pool.query('SELECT take_profit, stop_loss_settings, percent_profit, percent_loss, api_name FROM api_keys WHERE id=?', [aa.api_id]);
+                let userApiCustom = apiRowCustom[0];
+                if (userApiCustom) {
+                    // Custom TP
+                    if (userApiCustom.take_profit === 'custom' && aa.open > 0 && aa.close == 0 && userApiCustom.percent_profit > 0) {
+                        const open = parseFloat(aa.open);
+                        const volume = parseFloat(aa.volume);
+                        const percentProfit = parseFloat(userApiCustom.percent_profit);
+                        let tpFiyat = 0;
+                        if (aa.trend === 'LONG') {
+                            tpFiyat = open * (1 + percentProfit / 100);
+                            if (bysym.price >= tpFiyat) {
+                                let profit = (tpFiyat - open) * volume;
+                                const msg = notifyTp({ ...aa, tp: tpFiyat, symbol: aa.symbol, trend: aa.trend }, { ...sg_loop, symbol: aa.symbol, trend: aa.trend }, 'Custom', profit, percentProfit, volume, { api_name: userApiCustom.api_name }, api_exchange, bysym.stepSize, bysym.vdigits);
+                                await pool.query('UPDATE user_signals SET close=?, closetime=NOW(), closed_volume=?, profit=?, status=2, event=CONCAT(event, "; Custom TP Hit") WHERE id=?', [tpFiyat, volume, profit, aa.id]);
+                                await bildirim_ekle(aa.user_id, msg);
+                                return;
+                            }
+                        } else if (aa.trend === 'SHORT') {
+                            tpFiyat = open * (1 - percentProfit / 100);
+                            if (bysym.price <= tpFiyat) {
+                                let profit = (open - tpFiyat) * volume;
+                                const msg = notifyTp({ ...aa, tp: tpFiyat, symbol: aa.symbol, trend: aa.trend }, { ...sg_loop, symbol: aa.symbol, trend: aa.trend }, 'Custom', profit, percentProfit, volume, { api_name: userApiCustom.api_name }, api_exchange, bysym.stepSize, bysym.vdigits);
+                                await pool.query('UPDATE user_signals SET close=?, closetime=NOW(), closed_volume=?, profit=?, status=2, event=CONCAT(event, "; Custom TP Hit") WHERE id=?', [tpFiyat, volume, profit, aa.id]);
+                                await bildirim_ekle(aa.user_id, msg);
+                                return;
+                            }
+                        }
+                    }
+                    // Custom SL
+                    if (userApiCustom.stop_loss_settings === 'custom' && aa.open > 0 && aa.close == 0 && userApiCustom.percent_loss > 0) {
+                        const open = parseFloat(aa.open);
+                        const volume = parseFloat(aa.volume);
+                        const percentLoss = parseFloat(userApiCustom.percent_loss);
+                        let slFiyat = 0;
+                        if (aa.trend === 'LONG') {
+                            slFiyat = open * (1 - percentLoss / 100);
+                            if (bysym.price <= slFiyat) {
+                                let zarar = (slFiyat - open) * volume;
+                                const profitPercent = (zarar / (open * volume)) * 100;
+                                const signalDetailsCustom = { ...sg_loop, symbol: sg_loop.symbol || aa.symbol };
+                                if (!signalDetailsCustom.symbol) {
+                                  print_log({ id: aa.id, uid: aa.user_id, usid: aa.id, chid: aa.channel_id, msg: 'UYARI: notifySl (custom SL) için symbol undefined! aa.symbol=' + (aa.symbol || '') + ', sg_loop.symbol=' + (sg_loop.symbol || ''), pool });
+                                }
+                                const msg = notifySl({ ...aa }, signalDetailsCustom, zarar, profitPercent, volume, slFiyat, { api_name: userApiCustom.api_name }, api_exchange, bysym.stepSize, bysym.vdigits);
+                                await pool.query('UPDATE user_signals SET close=?, closetime=NOW(), closed_volume=?, profit=?, status=2, sl_hit=1, event=CONCAT(event, "; Custom SL Hit") WHERE id=?', [slFiyat, volume, zarar, aa.id]);
+                                await bildirim_ekle(aa.user_id, msg);
+                                return;
+                            }
+                        } else if (aa.trend === 'SHORT') {
+                            slFiyat = open * (1 + percentLoss / 100);
+                            if (bysym.price >= slFiyat) {
+                                let zarar = (open - slFiyat) * volume;
+                                const profitPercent = (zarar / (open * volume)) * 100;
+                                const signalDetailsCustom = { ...sg_loop, symbol: sg_loop.symbol || aa.symbol };
+                                if (!signalDetailsCustom.symbol) {
+                                  print_log({ id: aa.id, uid: aa.user_id, usid: aa.id, chid: aa.channel_id, msg: 'UYARI: notifySl (custom SL) için symbol undefined! aa.symbol=' + (aa.symbol || '') + ', sg_loop.symbol=' + (sg_loop.symbol || ''), pool });
+                                }
+                                const msg = notifySl({ ...aa }, signalDetailsCustom, zarar, profitPercent, volume, slFiyat, { api_name: userApiCustom.api_name }, api_exchange, bysym.stepSize, bysym.vdigits);
+                                await pool.query('UPDATE user_signals SET close=?, closetime=NOW(), closed_volume=?, profit=?, status=2, sl_hit=1, event=CONCAT(event, "; Custom SL Hit") WHERE id=?', [slFiyat, volume, zarar, aa.id]);
+                                await bildirim_ekle(aa.user_id, msg);
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                setTimeout(function() { signalLoop(borsa, current_s_id, current_user_id, current_us_id, current_ch_id); }, 100);
+
+            } catch (e) {
+                const log_id = (typeof aa !== 'undefined' && aa && aa.id) ? aa.id : '';
+                const log_uid = (typeof current_api !== 'undefined' && current_api && current_api.user_id) ? current_api.user_id : '';
+                const log_usid = (typeof aa !== 'undefined' && aa && aa.id) ? aa.id : '';
+                const errorMsg = `signalLoop error: ${e}\nStack: ${e && e.stack ? e.stack : ''}`;
+                print_log({ id: log_id, uid: log_uid, usid: log_usid, chid: current_ch_id, msg: errorMsg, pool });
+                return;
+            }
+        }
+
+        if (loop_signal) {
+            signalLoop(borsa, s_id, user_id, us_id, ch_id);
+        }
+    } catch (e) {
+        print_log({
+            id: s_id,
+            uid: user_id,
+            usid: us_id,
+            chid: ch_id,
+            msg: `run_user hata verdi: ${e && e.message ? e.message : e} | Stack: ${e && e.stack ? e.stack : ''}`,
+            pool
+        });
+    }
+}
+
+// BingX için miktar formatlama fonksiyonu ekle
+function formatBingxQty(qty, stepSize, vdigits) {
+    return (Math.floor(parseFloat(qty) / stepSize) * stepSize).toFixed(vdigits);
+}
+
+export { run_user };

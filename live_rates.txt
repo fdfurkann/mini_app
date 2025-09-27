@@ -1,0 +1,5 @@
+MySQL bağlantısı başarılı.
+rates tablosu temizlendi.
+Borsa bilgileri çekiliyor...
+Toplam 578 adet sembol bilgisi işlendi.
+Tüm semboller rates tablosuna eklendi.

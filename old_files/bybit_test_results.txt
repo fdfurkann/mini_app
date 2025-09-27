@@ -1,0 +1,213 @@
+url: https://api.bybit.com/v5/market/instruments-info
+params: category=linear&limit=1000
+symbolInfo: {
+  symbol: 'HIGHUSDT',
+  contractType: 'LinearPerpetual',
+  status: 'Trading',
+  baseCoin: 'HIGH',
+  quoteCoin: 'USDT',
+  launchTime: '1675759370000',
+  deliveryTime: '0',
+  deliveryFeeRate: '',
+  priceScale: '4',
+  leverageFilter: { minLeverage: '1', maxLeverage: '25.00', leverageStep: '0.01' },
+  priceFilter: { minPrice: '0.0001', maxPrice: '1999.9998', tickSize: '0.0001' },
+  lotSizeFilter: {
+    maxOrderQty: '101260.0',
+    minOrderQty: '0.1',
+    qtyStep: '0.1',
+    postOnlyMaxOrderQty: '101260.0',
+    maxMktOrderQty: '14480.0',
+    minNotionalValue: '5'
+  },
+  unifiedMarginTrade: true,
+  fundingInterval: 480,
+  settleCoin: 'USDT',
+  copyTrading: 'both',
+  upperFundingRate: '0.02',
+  lowerFundingRate: '-0.02',
+  isPreListing: false,
+  preListingInfo: null,
+  riskParameters: { priceLimitRatioX: '0.15', priceLimitRatioY: '0.3' },
+  displayName: ''
+}
+url: https://api.bybit.com/v5/position/set-leverage
+params: category=linear&symbol=HIGHUSDT&buyLeverage=20&sellLeverage=20
+Kaldıraç Ayar Sonucu: { code: 110043, msg: 'leverage not modified' }
+url: https://api.bybit.com/v5/position/switch-isolated
+params: category=linear&symbol=HIGHUSDT&buyLeverage=20&sellLeverage=20&tradeMode=0
+Margin Tipi Ayar Sonucu: { code: 100028, msg: 'unified account is forbidden' }
+url: https://api.bybit.com/v5/market/tickers
+params: category=linear&symbol=HIGHUSDT
+Son Fiyat: 0.6129
+İşlem Miktarı: 9.7
+Stop Loss Fiyatı: 0.5823
+Take Profit Fiyatı: 0.6435
+orders: [
+  {
+    category: 'linear',
+    symbol: 'HIGHUSDT',
+    side: 'Buy',
+    orderType: 'Market',
+    type: 'MARKET',
+    qty: '9.7'
+  },
+  {
+    category: 'linear',
+    type: 'SL',
+    symbol: 'HIGHUSDT',
+    stopLoss: '0.5823',
+    tpslMode: 'Full',
+    qty: '9.7',
+    timeInForce: 'GTC'
+  },
+  {
+    category: 'linear',
+    type: 'TP',
+    symbol: 'HIGHUSDT',
+    takeProfit: '0.6435',
+    tpslMode: 'Full',
+    qty: '9.7',
+    timeInForce: 'GTC'
+  }
+]
+url: https://api.bybit.com/v5/order/create
+params: category=linear&symbol=HIGHUSDT&side=Buy&orderType=Market&qty=9.7
+{"retCode":0,"retMsg":"OK","result":{"orderId":"f0cde7d3-1ced-455b-b34e-18d36d49d197","orderLinkId":""},"retExtInfo":{},"time":1752435414552}
+url: https://api.bybit.com/v5/position/trading-stop
+params: category=linear&symbol=HIGHUSDT&stopLoss=0.5823&tpslMode=Full&qty=9.7&timeInForce=GTC
+{"retCode":0,"retMsg":"OK","result":{},"retExtInfo":{},"time":1752435414766}
+url: https://api.bybit.com/v5/order/realtime
+params: category=linear&settleCoin=USDT
+url: https://api.bybit.com/v5/position/trading-stop
+params: category=linear&symbol=HIGHUSDT&takeProfit=0.6435&tpslMode=Full&qty=9.7&timeInForce=GTC
+{"retCode":0,"retMsg":"OK","result":{},"retExtInfo":{},"time":1752435415518}
+url: https://api.bybit.com/v5/order/realtime
+params: category=linear&settleCoin=USDT
+Bulk Order Sonucu: [
+  {
+    orderId: 'f0cde7d3-1ced-455b-b34e-18d36d49d197',
+    status: 'FILLED',
+    code: '',
+    msg: 'OK'
+  },
+  {
+    orderId: '59564b1e-2983-4cbc-8def-59fc4fca8e8b',
+    status: 'FILLED',
+    code: '',
+    msg: 'OK'
+  },
+  {
+    orderId: '7d5fbd4b-995c-4757-ab15-3a3bfcd2cc0b',
+    status: 'FILLED',
+    code: '',
+    msg: 'OK'
+  }
+]
+order_send(symbol:HIGHUSDT,side:SELL,type:LIMIT,amount:1.9,price:0.619,cls:1)
+url: https://api.bybit.com/v5/position/list
+params: category=linear&settleCoin=USDT
+emri_kapat : 1
+o_keys:{"category":"linear","symbol":"HIGHUSDT","side":"Sell","orderType":"Limit","reduceOnly":"true","qty":"1.9","price":"0.619","timeInForce":"GTC"}
+{
+  category: 'linear',
+  symbol: 'HIGHUSDT',
+  side: 'Sell',
+  orderType: 'Limit',
+  reduceOnly: 'true',
+  qty: '1.9',
+  price: '0.619',
+  timeInForce: 'GTC'
+}
+call url:/v5/order/create
+url: https://api.bybit.com/v5/order/create
+params: category=linear&symbol=HIGHUSDT&side=Sell&orderType=Limit&reduceOnly=true&qty=1.9&price=0.619&timeInForce=GTC
+ order result:{"retCode":0,"retMsg":"OK","result":{"orderId":"092b738b-e21c-42ed-97a0-8e3d49d2ec86","orderLinkId":""},"retExtInfo":{},"time":1752435416811}
+{"retCode":0,"retMsg":"OK","result":{"orderId":"092b738b-e21c-42ed-97a0-8e3d49d2ec86","orderLinkId":""},"retExtInfo":{},"time":1752435416811}
+%1 TP Limit Emri: {
+  orderId: '092b738b-e21c-42ed-97a0-8e3d49d2ec86',
+  status: 'FILLED',
+  code: '',
+  msg: 'OK'
+}
+order_send(symbol:HIGHUSDT,side:SELL,type:LIMIT,amount:1.9,price:0.6251,cls:1)
+url: https://api.bybit.com/v5/position/list
+params: category=linear&settleCoin=USDT
+emri_kapat : 1
+o_keys:{"category":"linear","symbol":"HIGHUSDT","side":"Sell","orderType":"Limit","reduceOnly":"true","qty":"1.9","price":"0.6251","timeInForce":"GTC"}
+{
+  category: 'linear',
+  symbol: 'HIGHUSDT',
+  side: 'Sell',
+  orderType: 'Limit',
+  reduceOnly: 'true',
+  qty: '1.9',
+  price: '0.6251',
+  timeInForce: 'GTC'
+}
+call url:/v5/order/create
+url: https://api.bybit.com/v5/order/create
+params: category=linear&symbol=HIGHUSDT&side=Sell&orderType=Limit&reduceOnly=true&qty=1.9&price=0.6251&timeInForce=GTC
+ order result:{"retCode":0,"retMsg":"OK","result":{"orderId":"1952350c-c46b-4391-9eae-b6969467c952","orderLinkId":""},"retExtInfo":{},"time":1752435417562}
+{"retCode":0,"retMsg":"OK","result":{"orderId":"1952350c-c46b-4391-9eae-b6969467c952","orderLinkId":""},"retExtInfo":{},"time":1752435417562}
+%2 TP Limit Emri: {
+  orderId: '1952350c-c46b-4391-9eae-b6969467c952',
+  status: 'FILLED',
+  code: '',
+  msg: 'OK'
+}
+order_send(symbol:HIGHUSDT,side:SELL,type:LIMIT,amount:1.9,price:0.6312,cls:1)
+url: https://api.bybit.com/v5/position/list
+params: category=linear&settleCoin=USDT
+emri_kapat : 1
+o_keys:{"category":"linear","symbol":"HIGHUSDT","side":"Sell","orderType":"Limit","reduceOnly":"true","qty":"1.9","price":"0.6312","timeInForce":"GTC"}
+{
+  category: 'linear',
+  symbol: 'HIGHUSDT',
+  side: 'Sell',
+  orderType: 'Limit',
+  reduceOnly: 'true',
+  qty: '1.9',
+  price: '0.6312',
+  timeInForce: 'GTC'
+}
+call url:/v5/order/create
+url: https://api.bybit.com/v5/order/create
+params: category=linear&symbol=HIGHUSDT&side=Sell&orderType=Limit&reduceOnly=true&qty=1.9&price=0.6312&timeInForce=GTC
+ order result:{"retCode":0,"retMsg":"OK","result":{"orderId":"461bec0c-6a5e-41a7-a8d6-e370c69cd00a","orderLinkId":""},"retExtInfo":{},"time":1752435418319}
+{"retCode":0,"retMsg":"OK","result":{"orderId":"461bec0c-6a5e-41a7-a8d6-e370c69cd00a","orderLinkId":""},"retExtInfo":{},"time":1752435418319}
+%3 TP Limit Emri: {
+  orderId: '461bec0c-6a5e-41a7-a8d6-e370c69cd00a',
+  status: 'FILLED',
+  code: '',
+  msg: 'OK'
+}
+order_send(symbol:HIGHUSDT,side:SELL,type:LIMIT,amount:1.9,price:0.6374,cls:1)
+url: https://api.bybit.com/v5/position/list
+params: category=linear&settleCoin=USDT
+emri_kapat : 1
+o_keys:{"category":"linear","symbol":"HIGHUSDT","side":"Sell","orderType":"Limit","reduceOnly":"true","qty":"1.9","price":"0.6374","timeInForce":"GTC"}
+{
+  category: 'linear',
+  symbol: 'HIGHUSDT',
+  side: 'Sell',
+  orderType: 'Limit',
+  reduceOnly: 'true',
+  qty: '1.9',
+  price: '0.6374',
+  timeInForce: 'GTC'
+}
+call url:/v5/order/create
+url: https://api.bybit.com/v5/order/create
+params: category=linear&symbol=HIGHUSDT&side=Sell&orderType=Limit&reduceOnly=true&qty=1.9&price=0.6374&timeInForce=GTC
+ order result:{"retCode":0,"retMsg":"OK","result":{"orderId":"d725cb3b-29fd-4820-a070-0ef8ec44f5a1","orderLinkId":""},"retExtInfo":{},"time":1752435419077}
+{"retCode":0,"retMsg":"OK","result":{"orderId":"d725cb3b-29fd-4820-a070-0ef8ec44f5a1","orderLinkId":""},"retExtInfo":{},"time":1752435419077}
+%4 TP Limit Emri: {
+  orderId: 'd725cb3b-29fd-4820-a070-0ef8ec44f5a1',
+  status: 'FILLED',
+  code: '',
+  msg: 'OK'
+}
+url: https://api.bybit.com/v5/position/list
+params: category=linear&settleCoin=USDT
+position_risk: { HIGHUSDT: '9.7' }

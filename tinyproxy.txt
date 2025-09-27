@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# ==============================================================================
+# Tinyproxy Otomatik Kurulum ve Yapılandırma Betiği
+# ==============================================================================
+
+# Betiğin root yetkileriyle çalışıp çalışmadığını kontrol et
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Bu betiği çalıştırmak için root yetkilerine sahip olmalısınız." >&2
+  echo "Lütfen 'sudo ./install_tinyproxy.sh' komutunu kullanın." >&2
+  exit 1
+fi
+
+# Kullanıcıdan gerekli bilgileri al
+clear
+echo "Tinyproxy Otomatik Kurulum Sihirbazına Hoş Geldiniz."
+echo "-----------------------------------------------------"
+read -p "Lütfen proxy'nin erişimine izin verilecek ANA sunucunuzun IP adresini girin: " MAIN_SERVER_IP
+
+# IP adresi boş olamaz
+if [[ -z "$MAIN_SERVER_IP" ]]; then
+    echo "Hata: Ana sunucu IP adresi boş bırakılamaz." >&2
+    exit 1
+fi
+
+read -p "Proxy için kullanılacak port numarasını girin (Varsayılan: 8888): " PROXY_PORT
+# Eğer port boş bırakılırsa varsayılan olarak 8888 kullan
+PROXY_PORT=${PROXY_PORT:-8888}
+
+echo ""
+echo "--------------------------------------------------"
+echo "Ayarlarınız Onaylanıyor:"
+echo "İzin Verilecek IP (Ana Sunucunuz): $MAIN_SERVER_IP"
+echo "Proxy Port Numarası              : $PROXY_PORT"
+echo "--------------------------------------------------"
+read -p "Ayarlar doğruysa devam etmek için Enter'a basın. İptal etmek için CTRL+C'ye basın."
+
+# --- Kurulum Başlıyor ---
+
+echo ""
+echo "İşlem başladı. Lütfen bekleyin..."
+echo ""
+
+# 1. Sistem paketlerini güncelle
+echo "[1/5] Sistem paketleri güncelleniyor..."
+apt-get update > /dev/null 2>&1 && apt-get upgrade -y > /dev/null 2>&1
+echo "    -> Güncelleme tamamlandı."
+
+# 2. Tinyproxy'yi kur
+echo "[2/5] Tinyproxy kuruluyor..."
+apt-get install tinyproxy -y > /dev/null 2>&1
+echo "    -> Tinyproxy kurulumu tamamlandı."
+
+# 3. Mevcut yapılandırmayı yedekle ve yenisini oluştur
+echo "[3/5] Tinyproxy yapılandırması oluşturuluyor..."
+CONFIG_FILE="/etc/tinyproxy/tinyproxy.conf"
+mv $CONFIG_FILE ${CONFIG_FILE}.bak_$(date +%F)
+
+# Heredoc kullanarak yeni ve temiz bir yapılandırma dosyası oluştur
+cat << EOF > $CONFIG_FILE
+# Otomatik olarak oluşturulan Tinyproxy yapılandırması
+User nobody
+Group nogroup
+
+Port ${PROXY_PORT}
+Timeout 600
+LogLevel Info
+LogFile "/var/log/tinyproxy/tinyproxy.log"
+PidFile "/run/tinyproxy/tinyproxy.pid"
+
+# Her yerden gelen bağlantıları dinle (erişim 'Allow' ile kısıtlanacak)
+Listen 0.0.0.0
+
+# SADECE ANA SUNUCUDAN GELEN İSTEKLERE İZİN VER
+Allow 170.64.201.133
+
+# Performans ayarları
+MaxClients 100
+MinSpareServers 5
+MaxSpareServers 20
+StartServers 10
+
+# Güvenlik ve Gizlilik Ayarları (Proxy kullanıldığını gizler)
+DisableViaHeader Yes
+Anonymous "Via"
+Anonymous "X-Forwarded-For"
+EOF
+
+echo "    -> Yapılandırma dosyası başarıyla oluşturuldu."
+
+# 4. Tinyproxy servisini yeniden başlat ve başlangıçta çalışacak şekilde ayarla
+echo "[4/5] Tinyproxy servisi yeniden başlatılıyor..."
+systemctl restart tinyproxy
+systemctl enable tinyproxy > /dev/null 2>&1
+echo "    -> Servis yeniden başlatıldı ve başlangıca eklendi."
+
+# 5. Kurulumun sonucunu kontrol et ve bilgileri göster
+echo "[5/5] Kurulum durumu kontrol ediliyor..."
+sleep 2 # Servisin başlaması için kısa bir bekleme
+
+# Bu sunucunun genel IP adresini al
+SERVER_IP=$(hostname -I | awk '{print $1}')
+
+if systemctl is-active --quiet tinyproxy; then
+    echo ""
+    echo "------------------------------------------------------------------"
+    echo "🎉 Tinyproxy başarıyla kuruldu ve çalışıyor! 🎉"
+    echo "------------------------------------------------------------------"
+    echo ""
+    echo "Ana uygulamanızın çalıştığı sunucudaki .env dosyanıza eklemeniz gereken satır:"
+    echo ""
+    echo "PROXY_URL=http://${SERVER_IP}:${PROXY_PORT}"
+    echo ""
+    echo "ÖNEMLİ NOT: Eğer bir güvenlik duvarı (firewall) kullanıyorsanız,"
+    echo "${PROXY_PORT} numaralı porta gelen TCP trafiğine izin vermeniz gerekmektedir."
+    echo "Örnek (UFW için): sudo ufw allow ${PROXY_PORT}/tcp"
+    echo ""
+    echo "------------------------------------------------------------------"
+else
+    echo "HATA: Tinyproxy servisi başlatılamadı." >&2
+    echo "Lütfen 'journalctl -u tinyproxy' komutu ile logları kontrol edin." >&2
+    exit 1
+fi

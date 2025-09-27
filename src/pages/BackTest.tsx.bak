@@ -1,0 +1,598 @@
+import React, { useEffect, useState } from 'react';
+import { format } from "date-fns";
+import { DateRange } from "react-day-picker";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { Slider } from "@/components/ui/slider";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { ChevronRight, ArrowLeft, PlayCircle, Calendar as CalendarIcon, Loader2 } from "lucide-react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { getChannels, ApiChannel } from "@/services/api";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import { cn } from "@/lib/utils";
+import { Calendar } from "@/components/ui/calendar";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  ResponsiveContainer,
+  LineChart,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  Line,
+} from "recharts";
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableCell,
+  TableRow,
+  TableHead,
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { useT } from '@/utils/locales';
+import { useToast } from "@/components/ui/use-toast";
+
+// Helper function to format dates (TradeHistory.tsx'den kopyalandı)
+const formatDate = (dateStr: string | null | undefined): string => {
+  if (!dateStr) return "-";
+  try {
+    const date = new Date(dateStr);
+    // Geçerli bir tarih olup olmadığını kontrol et
+    if (isNaN(date.getTime())) {
+      return "-"; 
+    }
+    return date.toLocaleString('tr-TR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } catch (e) {
+    console.error("Tarih formatlama hatası:", e, "Girdi:", dateStr);
+    return "-"; // Hata durumunda veya geçersiz tarihse tire döndür
+  }
+};
+
+const BackTest = () => {
+  const navigate = useNavigate();
+  const [channels, setChannels] = useState<ApiChannel[]>([]);
+  const [selectedChannel, setSelectedChannel] = useState<string>("");
+  const [loadingChannels, setLoadingChannels] = useState(true);
+  const [dateRange, setDateRange] = useState<DateRange | undefined>();
+  const [isLoadingBacktest, setIsLoadingBacktest] = useState(false);
+  const [backtestResults, setBacktestResults] = useState<any[]>([]);
+  const [chartData, setChartData] = useState<any[]>([]);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
+  const { toast } = useToast();
+
+  // Settings sayfasından kopyalanan state'ler
+  const [autoTrade, setAutoTrade] = React.useState(false);
+  const [leverage, setLeverage] = React.useState([20]);
+  const [entryAmount, setEntryAmount] = useState<string>("100");
+  const [tradeType, setTradeType] = useState("ISOLATED");
+  const [entryType, setEntryType] = useState("percentage");
+  const [singleTpValue, setSingleTpValue] = useState("50");
+  const [stopLossType, setStopLossType] = useState("signal");
+  const [customStopLoss, setCustomStopLoss] = useState("10");
+  const [breakEvenLevel, setBreakEvenLevel] = useState("none");
+  const [trailStopLevel, setTrailStopLevel] = useState("none");
+  const [maxOrders, setMaxOrders] = useState("10");
+  const [stopLossActionType, setStopLossActionType] = useState("none");
+  const [specificLossPercentage, setSpecificLossPercentage] = useState("10");
+  const [multipleTpValues, setMultipleTpValues] = useState({
+    tp1: 20, tp2: 20, tp3: 20, tp4: 20, tp5: 20,
+    tp6: 20, tp7: 20, tp8: 20, tp9: 20, tp10: 20
+  });
+
+  const t = useT();
+
+  useEffect(() => {
+    // Kanalları yükle
+    const fetchChannelsData = async () => {
+      try {
+        // Eğer daha önce yüklenmediyse yükle
+        if (loadingChannels) {
+          setLoadingChannels(true);
+          const channelsData = await getChannels();
+          setChannels(channelsData);
+          setLoadingChannels(false);
+        }
+      } catch (error) {
+        console.error("Kanallar yüklenirken hata:", error);
+        toast({
+          title: t('error'),
+          description: t('backtest.channelLoadError'),
+          variant: "destructive",
+        });
+        setLoadingChannels(false);
+      }
+    };
+    
+    fetchChannelsData();
+  }, [toast, t]);
+
+  const handleBacktestStart = async () => {
+    try {
+      setIsLoadingBacktest(true);
+      setBacktestError(null);
+
+      const params = {
+        selectedChannel,
+        startDate: dateRange?.from ? format(dateRange.from, 'yyyy-MM-dd HH:mm:ss') : null,
+        endDate: dateRange?.to ? format(dateRange.to, 'yyyy-MM-dd HH:mm:ss') : null,
+        autoTrade,
+        leverage: leverage[0],
+        entryAmount,
+        tradeType,
+        entryType,
+        singleTpValue,
+        stopLossType,
+        customStopLoss,
+        breakEvenLevel,
+        trailStopLevel,
+        maxOrders,
+        stopLossActionType,
+        specificLossPercentage,
+        multipleTpValues
+      };
+
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/backtest/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(params)
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        const errorMessage = errorData.error || `HTTP error! status: ${response.status}`;
+        console.error("Backtest Hatası:", errorMessage);
+        setBacktestError(errorMessage);
+        toast({
+          title: t('error'),
+          description: errorMessage,
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const data = await response.json();
+      setBacktestResults(data.tableData);
+      setChartData(data.chartData);
+      navigate('/backtest/results', { state: { results: data } });
+
+    } catch (err) {
+      console.error("Backtest Hatası:", err);
+      const errorMessage = err instanceof Error ? err.message : t('backtest.unknownError');
+      setBacktestError(errorMessage);
+      toast({
+        title: t('error'),
+        description: errorMessage,
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoadingBacktest(false);
+    }
+  };
+
+  return (
+    <div className="w-full max-w-none space-y-6">
+      <div className="flex items-center gap-2 mb-6">
+        {/* Geri butonu isteğe bağlı olarak kalabilir veya kaldırılabilir */}
+        {/* <Button variant="ghost" size="sm" onClick={() => navigate(-1)}>
+          <ArrowLeft className="h-4 w-4" />
+        </Button> */}
+        <h1 className="text-2xl font-bold">{t('backtest.title')}</h1>
+      </div>
+
+      <Card>
+        <CardContent className="space-y-6 pt-6">
+          {/* Kanal Seçimi */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-0.5 flex-1">
+              <Label htmlFor="channelSelect">{t('backtest.channelSelect')}</Label>
+              <p className="text-sm text-muted-foreground">{t('backtest.channelSelectDescription')}</p>
+            </div>
+            <div className="flex-1">
+              <Select 
+                value={selectedChannel}
+                onValueChange={setSelectedChannel}
+                disabled={loadingChannels}
+              >
+                <SelectTrigger id="channelSelect">
+                  <SelectValue placeholder={loadingChannels ? t('loading') : t('backtest.selectChannel')} />
+                </SelectTrigger>
+                <SelectContent>
+                  {channels.map(channel => (
+                    <SelectItem key={channel.id} value={channel.room_id}>
+                      {channel.room_name || `ID: ${channel.id}`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          
+          {/* Tarih Aralığı Seçimi */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-0.5 flex-1">
+              <Label htmlFor="dateRangePicker">{t('backtest.dateRange')}</Label>
+              <p className="text-sm text-muted-foreground">{t('backtest.dateRangeDescription')}</p>
+            </div>
+            <div className="flex-1">
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button
+                    id="dateRangePicker"
+                    variant={"outline"}
+                    className={cn(
+                      "w-full justify-start text-left font-normal",
+                      !dateRange && "text-muted-foreground"
+                    )}
+                  >
+                    <CalendarIcon className="mr-2 h-4 w-4" />
+                    {dateRange?.from ? (
+                      dateRange.to ? (
+                        <>
+                          {format(dateRange.from, "dd/MM/y")} - {" "}
+                          {format(dateRange.to, "dd/MM/y")}
+                        </>
+                      ) : (
+                        format(dateRange.from, "dd/MM/y")
+                      )
+                    ) : (
+                      <span>{t('backtest.selectDateRange')}</span>
+                    )}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <Calendar
+                    initialFocus
+                    mode="range"
+                    defaultMonth={dateRange?.from}
+                    selected={dateRange}
+                    onSelect={setDateRange}
+                    numberOfMonths={2}
+                  />
+                </PopoverContent>
+              </Popover>
+            </div>
+          </div>
+          
+          {/* ----- Settings.tsx'ten Kopyalanan Ayarlar ----- */}
+
+          {/* Otomatik Trading Switch */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-0.5 flex-1">
+              <Label>{t('backtest.autoTrade')}</Label>
+              <p className="text-sm text-muted-foreground">{t('backtest.autoTradeDescription')}</p>
+            </div>
+            <div className="flex justify-end flex-1">
+              <Switch checked={autoTrade} onCheckedChange={setAutoTrade} />
+            </div>
+          </div>
+
+          {/* İşleme Giriş Miktarı */}
+          <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+            <div className="space-y-0.5 flex-1">
+              <Label>{t('backtest.entryAmount')}</Label>
+              <p className="text-sm text-muted-foreground">{t('backtest.entryAmountDescription')}</p>
+            </div>
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  value={entryAmount}
+                  onChange={(e) => setEntryAmount(e.target.value)}
+                  placeholder={t('backtest.enterAmount')}
+                  className="flex-grow"
+                  min="0"
+                />
+                <span className="text-sm font-medium text-muted-foreground">{t('backtest.usdt')}</span>
+              </div>
+              {/* Info Text Accordion */}
+              <Accordion type="single" collapsible className="w-full mt-2">
+                <AccordionItem value="item-1">
+                  <AccordionTrigger className="text-xs font-semibold text-muted-foreground hover:no-underline py-1">
+                    {t('backtest.howMuchToEnter')}
+                  </AccordionTrigger>
+                  <AccordionContent className="text-xs text-muted-foreground space-y-1 pt-1">
+                    <p>{t('backtest.enterAmountInfo1')}</p>
+                    <p>{t('backtest.enterAmountInfo2')}</p>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
+            </div>
+          </div>
+
+          {/* Kaldıraç Slider */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-0.5 flex-1">
+              <Label>{t('backtest.leverage')}</Label>
+              <p className="text-sm text-muted-foreground">{t('backtest.leverageDescription')}</p>
+            </div>
+            <div className="flex-1">
+              <Slider
+                value={leverage}
+                onValueChange={setLeverage}
+                max={25}
+                min={1}
+                step={1}
+              />
+              <div className="flex justify-between mt-1">
+                <span className="text-sm text-muted-foreground">{t('backtest.safe')}</span>
+                <span className="text-sm font-medium">{leverage}x</span>
+                <span className="text-sm text-muted-foreground">{t('backtest.risky')}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* İşlem Türü */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-0.5 flex-1">
+              <Label>{t('backtest.tradeType')}</Label>
+              <p className="text-sm text-muted-foreground">{t('backtest.tradeTypeDescription')}</p>
+            </div>
+            <div className="flex-1">
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  variant={tradeType === "ISOLATED" ? "default" : "outline"}
+                  onClick={() => setTradeType("ISOLATED")}
+                  className="w-full"
+                >
+                  {t('backtest.isolated')}
+                </Button>
+                <Button
+                  variant={tradeType === "CROSS" ? "default" : "outline"}
+                  onClick={() => setTradeType("CROSS")}
+                  className="w-full"
+                >
+                  {t('backtest.cross')}
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Kar Al İşlem Ayarları */}
+          <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+            <div className="space-y-0.5 flex-1">
+              <Label>{t('backtest.profitTradeSettings')}</Label>
+              <p className="text-sm text-muted-foreground">{t('backtest.profitTradeSettingsDescription')}</p>
+            </div>
+            <div className="flex-1 space-y-4">
+              <Select value={entryType} onValueChange={setEntryType}>
+                <SelectTrigger>
+                  <SelectValue placeholder={t('backtest.profitTradeSelect')} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">{t('backtest.closed')}</SelectItem>
+                  <SelectItem value="percentage">{t('backtest.percentage')}</SelectItem>
+                  <SelectItem value="fixed">{t('backtest.fixedAmount')}</SelectItem>
+                </SelectContent>
+              </Select>
+
+              {/* Koşullu Renderlama: Hiçbiri seçilmediyse göster */}
+              {entryType !== 'none' && (
+                entryType === "percentage" ? (
+                  <div className="space-y-4">
+                    {Array.from({length: 10}, (_, i) => (
+                      <div key={`tp${i+1}`} className="flex items-center justify-between gap-2">
+                        <Label className="w-20">{t('backtest.tp')}{i+1}</Label>
+                        <div className="flex-1">
+                          <Slider
+                            value={[multipleTpValues[`tp${i+1}`]]}
+                            onValueChange={(newValue) => setMultipleTpValues(prev => ({
+                              ...prev,
+                              [`tp${i+1}`]: newValue[0]
+                            }))}
+                            max={100}
+                            min={0}
+                            step={1}
+                          />
+                        </div>
+                        <span className="w-12 text-right text-sm font-medium">{multipleTpValues[`tp${i+1}`]}%</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-2">
+                    <Label>{t('backtest.tpLevel')}</Label>
+                    <div className="relative flex-1">
+                      <span className="absolute left-2 top-1/2 transform -translate-y-1/2">%</span>
+                      <Input
+                        type="number"
+                        value={singleTpValue}
+                        onChange={(e) => setSingleTpValue(e.target.value)}
+                        className="pl-6"
+                        min="0"
+                        max="100"
+                      />
+                    </div>
+                  </div>
+                )
+              )}
+            </div>
+          </div>
+
+          {/* Zarar Durdur İşlem Ayarları (Yeni Dropdown) */}
+          <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+            <div className="space-y-0.5 flex-1">
+              <Label>{t('backtest.stopLossSettings')}</Label>
+              <p className="text-sm text-muted-foreground">{t('backtest.stopLossSettingsDescription')}</p>
+            </div>
+            <div className="flex-1 space-y-4">
+              <Select value={stopLossActionType} onValueChange={setStopLossActionType}>
+                <SelectTrigger>
+                  <SelectValue placeholder={t('backtest.actionSelect')} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">{t('backtest.closed')}</SelectItem>
+                  <SelectItem value="trailStop">{t('backtest.trailStop')}</SelectItem>
+                  <SelectItem value="maliyetineCek">{t('backtest.costToWithdraw')}</SelectItem>
+                  <SelectItem value="belirliZarar">{t('backtest.specificLoss')}</SelectItem>
+                </SelectContent>
+              </Select>
+
+              {stopLossActionType === 'belirliZarar' && (
+                <>
+                  <div className="flex items-center justify-between gap-2 mt-2">
+                    <Label>{t('backtest.lossPercentage')}</Label>
+                    <div className="relative flex-1">
+                      <Input
+                        type="number"
+                        value={specificLossPercentage}
+                        onChange={(e) => setSpecificLossPercentage(e.target.value)}
+                        className="pr-8"
+                        min="0"
+                        max="100"
+                      />
+                      <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-sm text-muted-foreground">%</span>
+                    </div>
+                  </div>
+                  <Accordion type="single" collapsible className="w-full mt-2">
+                    <AccordionItem value="item-1">
+                      <AccordionTrigger className="text-xs font-semibold text-muted-foreground hover:no-underline py-1">
+                        {t('backtest.specificLossInfo')}
+                      </AccordionTrigger>
+                      <AccordionContent className="text-xs text-muted-foreground space-y-1 pt-1">
+                        <p>{t('backtest.specificLossInfo1')}</p>
+                        <p>{t('backtest.specificLossInfo2')}</p>
+                      </AccordionContent>
+                    </AccordionItem>
+                  </Accordion>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Maliyetine Çek (Koşullu) */}
+          {stopLossActionType === 'maliyetineCek' && (
+            <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+              <div className="space-y-0.5 flex-1">
+                <Label>{t('backtest.costToWithdraw')}</Label>
+                <p className="text-sm text-muted-foreground">{t('backtest.costToWithdrawDescription')}</p>
+              </div>
+              <div className="flex-1">
+                <Select value={breakEvenLevel} onValueChange={setBreakEvenLevel}>
+                  <SelectTrigger>
+                    <SelectValue placeholder={t('backtest.levelSelect')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">{t('backtest.none')}</SelectItem>
+                    <SelectItem value="tp1">{t('backtest.tp1')}</SelectItem>
+                    <SelectItem value="tp2">{t('backtest.tp2')}</SelectItem>
+                    <SelectItem value="tp3">{t('backtest.tp3')}</SelectItem>
+                    <SelectItem value="tp4">{t('backtest.tp4')}</SelectItem>
+                    <SelectItem value="tp5">{t('backtest.tp5')}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Accordion type="single" collapsible className="w-full mt-2">
+                  <AccordionItem value="item-1">
+                    <AccordionTrigger className="text-xs font-semibold text-muted-foreground hover:no-underline py-1">
+                      {t('backtest.costToWithdrawInfo')}
+                    </AccordionTrigger>
+                    <AccordionContent className="text-xs text-muted-foreground space-y-1 pt-1">
+                      <p>{t('backtest.costToWithdrawInfo1')}</p>
+                      <p>{t('backtest.costToWithdrawInfo2')}</p>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+              </div>
+            </div>
+          )}
+
+          {/* TrailStop (Koşullu) */}
+          {stopLossActionType === 'trailStop' && (
+            <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+              <div className="space-y-0.5 flex-1">
+                <Label>{t('backtest.trailStop')}</Label>
+                <p className="text-sm text-muted-foreground">{t('backtest.trailStopDescription')}</p>
+              </div>
+              <div className="flex-1">
+                <Select value={trailStopLevel} onValueChange={setTrailStopLevel}>
+                  <SelectTrigger>
+                    <SelectValue placeholder={t('backtest.levelSelect')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">{t('backtest.none')}</SelectItem>
+                    <SelectItem value="tp1">{t('backtest.tp1')}</SelectItem>
+                    <SelectItem value="tp2">{t('backtest.tp2')}</SelectItem>
+                    <SelectItem value="tp3">{t('backtest.tp3')}</SelectItem>
+                    <SelectItem value="tp4">{t('backtest.tp4')}</SelectItem>
+                    <SelectItem value="tp5">{t('backtest.tp5')}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Accordion type="single" collapsible className="w-full mt-2">
+                  <AccordionItem value="item-1">
+                    <AccordionTrigger className="text-xs font-semibold text-muted-foreground hover:no-underline py-1">
+                      {t('backtest.trailStopInfo')}
+                    </AccordionTrigger>
+                    <AccordionContent className="text-xs text-muted-foreground space-y-1 pt-1">
+                      <p>{t('backtest.trailStopInfo1')}</p>
+                      <p>{t('backtest.trailStopInfo2')}</p>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+              </div>
+            </div>
+          )}
+
+          {/* Maks Emir Miktarı */}
+          <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+            <div className="space-y-0.5 flex-1">
+              <Label>{t('backtest.maxOrders')}</Label>
+              <p className="text-sm text-muted-foreground">{t('backtest.maxOrdersDescription')}</p>
+            </div>
+            <div className="flex-1">
+              <Input
+                type="number"
+                value={maxOrders}
+                onChange={(e) => setMaxOrders(e.target.value)}
+                min="1"
+              />
+            </div>
+          </div>
+
+        </CardContent>
+      </Card>
+      
+      {/* Backtest Başlat Butonu */}
+      <div className="flex justify-end mt-6">
+        <Button 
+          onClick={handleBacktestStart}
+          disabled={!selectedChannel || loadingChannels || !dateRange?.from || !dateRange?.to}
+          size="lg"
+          className="gap-2"
+        >
+            <PlayCircle size={18} />
+            {t('backtest.startBacktest')}
+        </Button>
+      </div>
+
+    </div>
+  );
+};
+
+export default BackTest; 

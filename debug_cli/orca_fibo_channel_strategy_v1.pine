@@ -1,0 +1,263 @@
+//@version=6
+strategy("Orca Fibo Channel Strategy v1", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=true, calc_on_every_tick=true, process_orders_on_close=true)
+
+// ── Inputs
+trailType   = input.string("modified", "ATR Trail Type", options = ["modified", "unmodified"])
+atrPeriod   = input.int(28, "ATR Period", minval = 1)
+atrFactor   = input.float(5.0, "ATR Factor", minval = 0.1, step = 0.1)
+
+swingSrc    = input.source(close, "Swing Source")
+swingPer    = input.int(20, "Swing Period", minval = 1)
+swingMult   = input.float(3.5, "Swing Multiplier", minval = 0.0000001)
+
+lenTP       = input.int(20, "TP SMA/STDEV Period", minval = 1)
+stdevMult   = input.float(2.5, "Standard Deviation Multiplier for TP")
+upColor     = input.color(#00ffbb, "Up Color")
+downColor   = input.color(#ff1100, "Down Color")
+confirmed   = input.int(1, "Use Confirmation", minval = 0, maxval = 1)
+useTrendStop = input.int(0, "Stop on Trend Reversal", minval = 0, maxval = 1)
+
+// ── Modified True Range parçaları
+hiLo = math.min(high - low, 1.5 * nz(ta.sma(high - low, atrPeriod)))
+
+float hRef = na
+if low <= high[1]
+    hRef := high - close[1]
+else
+    hRef := high - close[1] - 0.5 * (low - high[1])
+
+float lRef = na
+if high >= low[1]
+    lRef := close[1] - low
+else
+    lRef := close[1] - low - 0.5 * (low[1] - high)
+
+// ── Seçilen TR (if/else; çok satırlı ? : yok)
+float trueRange = na
+if trailType == "modified"
+    trueRange := math.max(math.max(hiLo, hRef), lRef)
+else
+    trueRange := math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+
+loss = atrFactor * ta.rma(trueRange, atrPeriod)
+up   = close - loss
+dn   = close + loss
+
+// ── Trend kanalları
+var float trendUp   = na
+var float trendDown = na
+trendUp   := na(trendUp[1])   ? up : (close[1] > trendUp[1]   ? math.max(up, trendUp[1])   : up)
+trendDown := na(trendDown[1]) ? dn : (close[1] < trendDown[1] ? math.min(dn, trendDown[1]) : dn)
+
+// ── Trend yönü (1/-1) ve trail
+var int trend = 1
+trend := close > trendDown[1] ? 1 : close < trendUp[1] ? -1 : nz(trend[1], 1)
+trail  = trend == 1 ? trendUp : trendDown
+
+// ── Ekstrem (ex) — if/else ile, intrabar kilitli
+var float ex = na
+float exNext = na
+if ta.crossover(trend, 0)
+    exNext := high
+else if ta.crossunder(trend, 0)
+    exNext := low
+else if trend == 1
+    exNext := math.max(nz(ex[1], high), high)
+else if trend == -1
+    exNext := math.min(nz(ex[1], low),  low)
+else
+    exNext := nz(ex[1])
+
+// intrabar “zıplamaları” kilitle
+if barstate.isconfirmed
+    ex := exNext
+else
+    ex := nz(ex[1], exNext)
+
+// ── Fibonacci bandı
+float fib1Level = 61.8
+float fib2Level = 78.6
+float fib3Level = 88.6
+
+f1   = ex + (trail - ex) * fib1Level / 100.0
+f2   = ex + (trail - ex) * fib2Level / 100.0
+f3   = ex + (trail - ex) * fib3Level / 100.0
+l100 = trail
+
+stateLong  = trend == 1
+stateShort = trend == -1
+
+pF1 = plot(f1,   "Fib 61.8", color=color.new(color.white, 0))
+pF2 = plot(f2,   "Fib 78.6", color=color.new(color.white, 0))
+pF3 = plot(f3,   "Fib 88.6", color=color.new(color.white, 0))
+pL  = plot(l100, "Trail 100", color=color.new(color.white, 0))
+
+fill(pF1, pF2, color = stateLong ? color.new(color.green, 90) : stateShort ? color.new(color.red, 90) : na)
+fill(pF2, pF3, color = stateLong ? color.new(color.green, 70) : stateShort ? color.new(color.red, 70) : na)
+fill(pF3, pL,  color = stateLong ? color.new(color.green, 60) : stateShort ? color.new(color.red, 60) : na)
+
+// ── Kapanan mum bazlı fib kesişimleri
+l1 = stateLong[1]  and ta.crossunder(close, f1[1])
+l2 = stateLong[1]  and ta.crossunder(close, f2[1])
+l3 = stateLong[1]  and ta.crossunder(close, f3[1])
+s1 = stateShort[1] and ta.crossover(close,  f1[1])
+s2 = stateShort[1] and ta.crossover(close,  f2[1])
+s3 = stateShort[1] and ta.crossover(close,  f3[1])
+
+// ── Swing Range Filter (yalın dönüş: filt)
+rng_size(x, qty, n) =>
+    wper   = n * 2 - 1
+    avrng  = ta.ema(math.abs(x - x[1]), n)
+    ta.ema(avrng, wper) * qty
+
+rng_filt_center(x, r) =>
+    var rfilt = array.new_float(2, x)
+    array.set(rfilt, 1, array.get(rfilt, 0))
+    if x - r > array.get(rfilt, 1)
+        array.set(rfilt, 0, x - r)
+    if x + r < array.get(rfilt, 1)
+        array.set(rfilt, 0, x + r)
+    array.get(rfilt, 0)
+
+filt = rng_filt_center(swingSrc, rng_size(swingSrc, swingMult, swingPer))
+
+var float fdir = 0.0
+fdir := filt > filt[1] ? 1 : filt < filt[1] ? -1 : fdir
+upward   = fdir == 1
+downward = fdir == -1
+
+longCond  = (swingSrc > filt) and upward
+shortCond = (swingSrc < filt) and downward
+
+var int condIni = 0
+condIni := longCond ? 1 : shortCond ? -1 : condIni[1]
+longSignal  = longCond  and condIni[1] == -1
+shortSignal = shortCond and condIni[1] ==  1
+
+// ── TP (SMA + STDEV) ve kapanış teyitli trend okları
+basis  = ta.sma(close, lenTP)
+stdev  = ta.stdev(close, lenTP, true)
+upper1 = basis + stdev * stdevMult
+lower1 = basis - stdev * stdevMult
+
+var int fastTrend = 0
+if close > basis and close > basis + stdev
+    fastTrend := 1
+else if close < basis and close < basis - stdev
+    fastTrend := -1
+
+devAmount = math.abs(ex - trail) * 0.10
+confirmationBull = low > l100 and low <= f1
+confirmationBear = high < l100 and high >= f1
+
+bullCond = ta.crossover(fastTrend, 0) and stateLong and barstate.isconfirmed
+bearCond = ta.crossunder(fastTrend, 0) and stateShort and barstate.isconfirmed
+
+bullArrow = confirmed == 1 ? (bullCond and confirmationBull) : bullCond
+bearArrow = confirmed == 1 ? (bearCond and confirmationBear) : bearCond
+
+// Condition for dot plots based on price entering the zone, without close confirmation
+dotConfirmationBull = stateLong and low < (f1 - devAmount)
+dotConfirmationBear = stateShort and high > (f1 + devAmount)
+
+plotBullDot = confirmed == 1 and dotConfirmationBull and not bullArrow
+plotBearDot = confirmed == 1 and dotConfirmationBear and not bearArrow
+
+// ───────────────────────── VISUAL SIGNALS
+plotshape(bullArrow, title="Bullish Entry", style=shape.labelup,   location=location.belowbar, color=upColor,   text=" ", textcolor=color.new(color.white, 0), size=size.small)
+plotshape(bearArrow, title="Bearish Entry", style=shape.labeldown, location=location.abovebar, color=downColor, text=" ", textcolor=color.new(color.white, 0), size=size.small)
+
+// Dots for potential signals
+plot(series=plotBullDot ? low - ta.tr * 0.2 : na, title="Potential Bull Signal", color=upColor, style=plot.style_circles, linewidth=2)
+plot(series=plotBearDot ? high + ta.tr * 0.2 : na, title="Potential Bear Signal", color=downColor, style=plot.style_circles, linewidth=2)
+
+
+shortTP = ta.crossover(close, lower1)
+longTP = ta.crossunder(close, upper1)
+
+// ───────────────────────── STRATEGY & P/L LOGIC
+var bool inLongTrade = false
+var bool inShortTrade = false
+var float entryPrice = na
+var int entryBarIndex = na
+var float cumulativeProfit = 0.0
+
+// Entry Logic
+if (bullArrow and not inLongTrade)
+    entryPrice := close
+    entryBarIndex := bar_index
+    inLongTrade := true
+    inShortTrade := false // Close short if long signal appears
+	
+	strategy.entry("Long", strategy.long)
+	
+
+if (bearArrow and not inShortTrade)
+    entryPrice := close
+    entryBarIndex := bar_index
+    inShortTrade := true
+    inLongTrade := false // Close long if short signal appears
+	
+	strategy.entry("Short", strategy.short)
+
+// Exit Logic
+isLongExit = longTP and inLongTrade
+isShortExit = shortTP and inShortTrade
+
+// Stop loss on trend reversal logic
+longStopExit = useTrendStop == 1 and inLongTrade and trend == -1
+shortStopExit = useTrendStop == 1 and inShortTrade and trend == 1
+
+if isLongExit or longStopExit
+    profit = close - entryPrice
+    cumulativeProfit += profit
+    line.new(x1=entryBarIndex, y1=entryPrice, x2=bar_index, y2=close, color=profit > 0 ? color.green : color.red, style=line.style_dashed, width=1)
+    label.new(x=bar_index, y=close, text=str.tostring(profit, '#.##') + " points", style=label.style_none, textcolor=profit > 0 ? color.green : color.red, size=size.normal)
+    inLongTrade := false
+	strategy.close("Long", comment="Long Exit")
+
+if isShortExit or shortStopExit
+    profit = entryPrice - close
+    cumulativeProfit += profit
+    line.new(x1=entryBarIndex, y1=entryPrice, x2=bar_index, y2=close, color=profit > 0 ? color.green : color.red, style=line.style_dashed, width=1)
+    label.new(x=bar_index, y=close, text=str.tostring(profit, '#.##') + " points", style=label.style_none, textcolor=profit > 0 ? color.green : color.red, size=size.normal)
+    inShortTrade := false
+	strategy.close("Short", comment="Short Exit")
+
+// Update plotchar conditions for TP
+plotchar(isShortExit, title="Short TP", char="$", location=location.belowbar, color=downColor, size=size.small)
+plotchar(isLongExit,  title="Long TP",  char="$", location=location.abovebar, color=upColor, size=size.small)
+
+// Display Cumulative Profit
+var table profitTable = table.new(position.top_center, 1, 1, bgcolor = color.new(#19be4b, 25), border_width = 1)
+if barstate.islast
+    table.cell(profitTable, 0, 0, "orca_fibo_channel_v1\nTotal Profit: " + str.tostring(cumulativeProfit, "#.##"), text_color=color.white, text_size=size.normal)
+
+
+// ───────────────────────── ALERTS
+// Alert koşulları - webhook için
+buyOpen = bullArrow and barstate.isconfirmed
+sellOpen = bearArrow and barstate.isconfirmed
+buyClose = isShortExit and barstate.isconfirmed  // Short pozisyon kapatma = Buy Close
+sellClose = isLongExit and barstate.isconfirmed  // Long pozisyon kapatma = Sell Close
+
+// Alert tanımları - webhook mesajları
+alertcondition(buyOpen, title="Buy Open", message="orca_fibo_channel_v1 {{ticker}} buy_open")
+alertcondition(sellOpen, title="Sell Open", message="orca_fibo_channel_v1 {{ticker}} sell_open")
+alertcondition(buyClose, title="Buy Close", message="orca_fibo_channel_v1 {{ticker}} buy_close")
+alertcondition(sellClose, title="Sell Close", message="orca_fibo_channel_v1 {{ticker}} sell_close")
+
+// Potential Signal Alerts
+alertcondition(plotBullDot, title="Potential Bull Signal", message="orca_fibo_channel_v1 {{ticker}} potential_bull_signal")
+alertcondition(plotBearDot, title="Potential Bear Signal", message="orca_fibo_channel_v1 {{ticker}} potential_bear_signal")
+
+// Restored Alerts
+alertcondition(l1, title="Long Fib1 Break",  message="Price crossed below Fib1 during long trend")
+alertcondition(l2, title="Long Fib2 Break",  message="Price crossed below Fib2 during long trend")
+alertcondition(l3, title="Long Fib3 Break",  message="Price crossed below Fib3 during long trend")
+alertcondition(s1, title="Short Fib1 Break", message="Price crossed above Fib1 during short trend")
+alertcondition(s2, title="Short Fib2 Break", message="Price crossed above Fib2 during short trend")
+alertcondition(s3, title="Short Fib3 Break", message="Price crossed above Fib3 during short trend")
+alertcondition(ta.cross(trend, 0), title="Trail Trend Shift", message="Trail trend changed direction")
+alertcondition(longSignal,  title="Range BUY",  message="Range filter BUY")
+alertcondition(shortSignal, title="Range SELL", message="Range filter SELL")

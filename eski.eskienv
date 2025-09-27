@@ -1,0 +1,19 @@
+# Telegram Bot Configuration
+BOT_NAME=OrcaTrade_bot
+BOT_TOKEN=7777730924:AAEx5FIXy8zMNg2aPx-RflMFRP6VJaYgilQ
+
+# API and App URLs
+VITE_API_URL=https://orcadev.orcatradebot.com/api
+VITE_APP_URL=https://orcadev.orcatradebot.com
+VITE_WS_URL=wss://orcadev.orcatradebot.com
+
+# Database Configuration
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=
+DB_NAME=orcatradebot2
+
+# Server Configuration
+PORT=3001
+NODE_ENV=development 
