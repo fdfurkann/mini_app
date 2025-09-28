@@ -220,6 +220,10 @@ class rbingx {
 		return $form;
 	}
 	
+	function get_balance() {
+		return $this->get_account_info();
+	}
+	
 	function get_account_info($symbol="") { // true = multi asset mode , false = single asset mode
 		$form = $this->call('/openApi/swap/v2/user/balance',1,array(),"GET");
 		$form = $this->obj2arr($form);

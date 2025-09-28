@@ -491,6 +491,22 @@ class rbybit
         return $order;
     }
 
+    function order_status($symbol, $orderid)
+    {
+        $params = ["category" => "linear", "orderId" => $orderid];
+        $order = $this->call("/v5/order/realtime", 1, $params, "GET");
+        $result = $this->obj2arr($order);
+        
+        // Bybit'in cevabı bir liste içinde tek bir eleman olarak dönebilir.
+        if (isset($result['result']['list'][0])) {
+            $orderData = $result['result']['list'][0];
+            // Binance formatına benzetmek için anahtar isimlerini değiştir
+            $orderData['avgPrice'] = $orderData['avgPrice'] ?? '0';
+            return $orderData;
+        }
+        return $result;
+    }
+
     function order_send($symbol, $side, $type, $amount, $price, $cls = 0)
     {
         trade_log(

@@ -49,10 +49,12 @@ $signal_id = $sid;
 $bildirim_gonder = 1;
 $pid = getmypid();
 
+/*
 // Manuel pozisyon kapama işlemlerini devre dışı bırak
 $my->query(
      "update `user_signals` set `open`='',`opentime`='',`close`='',`closetime`='',`ticket`='',status=0 where `id` = '$sid';"
 );
+*/
 
 function print_rr($arr, $alt = 0)
 {

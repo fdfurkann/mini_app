@@ -273,6 +273,13 @@ class rbinance
         return $order;
     }
 
+    function order_status($symbol, $orderid)
+    {
+        $params = ["symbol" => $symbol, "orderId" => $orderid];
+        $order = $this->call("/fapi/v1/order", 1, $params, "GET");
+        return $this->obj2arr($order);
+    }
+
     function order_send($symbol, $side, $type, $amount, $price, $cls = 0)
     {
         $o_keys = ["symbol" => $symbol, "side" => $side, "type" => $type]; // ,"workingType"=>"CONTRACT_PRICE"
