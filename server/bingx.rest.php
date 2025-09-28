@@ -512,6 +512,28 @@ class rbingx {
 		return $n_orders;
 	}  
 
+    public function order_status($symbol, $orderId) {
+        try {
+            $symbol = str_replace("USDT", "-USDT", $symbol);
+            $params = [
+                "symbol" => $symbol,
+                "orderId" => $orderId,
+                "timestamp" => round(microtime(true) * 1000)
+            ];
+            $response = $this->call('/openApi/swap/v2/trade/order', 1, $params, "GET");
+            $responseArray = json_decode(json_encode($response), true);
+
+            if (isset($responseArray['data']['order'])) {
+                return $responseArray['data']['order'];
+            } else {
+                return $responseArray;
+            }
+        } catch (Exception $e) {
+            error_log("BingX order_status Error: " . $e->getMessage());
+            return ['code' => -1, 'msg' => 'An exception occurred: ' . $e->getMessage()];
+        }
+    }
+
     // Sembol hassasiyet ve minQty, stepSize bilgisi için
     function exchange_info($symbol) {
         $symbol = str_replace("USDT","-USDT",$symbol);
