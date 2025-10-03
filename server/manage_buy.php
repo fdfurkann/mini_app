@@ -365,7 +365,8 @@ if ($aa["close"] > 0 && $aa["volume"] <= $aa["closed_volume"]) {
 
     if ($current_tp_level > $user_tp_hit) {
         $i = $current_tp_level;
-        if (isset($api["tp" . $i]) && $api["tp" . $i] > 0) {
+        // Güvenli erişim: hem api hem de signal tarafında tp key'inin olduğundan emin olalım
+        if (isset($api["tp" . $i]) && $api["tp" . $i] > 0 && isset($signal["tp" . $i]) && $signal["tp" . $i] > 0) {
             // print_log($my, $s_id, $user_id, $us_id, $channel, "manage_buy: TP{$i} hit for signal ID {$signal_id}. Sending notification.");
 
             $tp_price = $signal["tp" . $i];
@@ -661,7 +662,9 @@ if ($aa["close"] > 0 && $aa["volume"] <= $aa["closed_volume"]) {
     // TP kontrolü
     if (!$pozisyon_kapatildi) {
         for ($i = 10; $i >= 1; $i--) {
+            // Güvenli erişim: signal'da tp key'i olmayabilir
             if (
+                isset($signal["tp" . $i]) &&
                 $signal["tp" . $i] > 0 &&
                 $sym["price"] >= $signal["tp" . $i]
             ) {

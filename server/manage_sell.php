@@ -603,10 +603,13 @@ if ($aa["close"] > 0 && $aa["volume"] <= $aa["closed_volume"]) {
             $break_sell = 1;
         }
 
+        // Güvenli erişim: signal'da tp key'i olmayabilir, isset ile kontrol edelim
+        $tpKey = "tp" . $i;
         if (
-            $sym["price"] <= $signal["tp" . $i] &&
-            ($aa["tp"] == 0 || $aa["tp"] > $signal["tp" . $i]) &&
-            $signal["tp" . $i] > 0
+            isset($signal[$tpKey]) &&
+            $signal[$tpKey] > 0 &&
+            $sym["price"] <= $signal[$tpKey] &&
+            ($aa["tp"] == 0 || $aa["tp"] > $signal[$tpKey])
         ) {
             // print_log($my, $s_id, $user_id, $us_id, $channel, "manage_sell: TP{$i} hit for signal ID {$signal_id} at price {$sym["price"]}. Closing order.");
           

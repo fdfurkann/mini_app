@@ -451,7 +451,8 @@ export async function send_channel_notifications(bot, pool) {
               messageText += `☪ Target ${i} - ${formatPriceTickSize(signal[tpKey], tickSize, pricePrecision)}${check}\n`;
             }
           }
-          const slCheck = (signal.sl_hit === 1) ? ' ❌' : '';
+          // sl_hit veritabanından string olarak gelebilir, bu yüzden sayı olarak karşılaştır
+          const slCheck = (parseInt(signal.sl_hit) === 1) ? ' ❌' : '';
           messageText += `⛔️ Stop Loss : ${formatPriceTickSize(signal.stop_loss, tickSize, pricePrecision)}${slCheck}\n`;
           messageText += `\nThis is not investment advice.`;
           // Butonları ekle
